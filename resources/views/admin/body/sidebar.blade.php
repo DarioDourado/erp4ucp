@@ -25,14 +25,25 @@
                 <li class="menu-title">Tabelas</li>
                 <li>
                     <a href="javascript: void(0);" class="has-arrow waves-effect">
-                        <i class="ri-table-2"></i>
-                        <span>Tables Primárias</span>
+                        <i class="ri-team-line"></i>
+                        <span>Business Partners</span>
                     </a>
                     <ul class="sub-menu" aria-expanded="false">
-                        <li><a href="{{  route('postalCode.all') }}">Códigos Postal</a></li>
-                        <li><a href="tables-datatable.html">Data Tables</a></li>\
-                        <li><a href="tables-responsive.html">Responsive Table</a></li>
-                        <li><a href="tables-editable.html">Editable Table</a></li>
+                        <li><a href="{{ route('supplier.all') }}">Suppliers</a></li>
+                        <li><a href="customers.html">Customers</a></li>
+                        <li><a href="leads.html">Leads</a></li>
+                    </ul>
+                </li>
+                <li>
+                    <a href="javascript: void(0);" class="has-arrow waves-effect">
+                        <i class="ri-table-2"></i>
+                        <span>Common Tables</span>
+                    </a>
+                    <ul class="sub-menu" aria-expanded="false">
+                        <li><a href="{{ route('family.all') }}">Family Products</a></li>
+                        <li><a href="{{ route('taxRate.all') }}">Tax Rates</a></li>
+                        <li><a href="{{ route('unitMeasure.all') }}">Measurement Units</a></li>
+                        <li><a href="{{ route('postalCode.all') }}">Postal Codes</a></li>
                     </ul>
                 </li>
                 <li>
