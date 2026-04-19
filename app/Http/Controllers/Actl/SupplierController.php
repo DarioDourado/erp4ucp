@@ -6,7 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\PostalCode;
 use App\Models\Supplier;
-use Auth;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Carbon;
 
 class SupplierController extends Controller
@@ -52,8 +52,9 @@ class SupplierController extends Controller
 
     public function SupplierEdit($id)
     {
+        $postalCodes = PostalCode::all();
         $supplier    = Supplier::findOrFail($id);
-        $postalCodes = PostalCode::latest()->get();
+        
         return view('backend.supplier.supplier_edit', compact('supplier', 'postalCodes'));
     }
 

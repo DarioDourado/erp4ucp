@@ -29,7 +29,6 @@
                         <span>Business Partners</span>
                     </a>
                     <ul class="sub-menu" aria-expanded="false">
-                        <li><a href="{{ route('supplier.all') }}">Suppliers</a></li>
                         <li><a href="customers.html">Customers</a></li>
                         <li><a href="leads.html">Leads</a></li>
                     </ul>
@@ -40,10 +39,11 @@
                         <span>Common Tables</span>
                     </a>
                     <ul class="sub-menu" aria-expanded="false">
+                        <li><a href="{{ route('postalCode.all') }}">Postal Codes</a></li>
+                        <li><a href="{{ route('supplier.all') }}">Suppliers</a></li>
                         <li><a href="{{ route('family.all') }}">Family Products</a></li>
                         <li><a href="{{ route('taxRate.all') }}">Tax Rates</a></li>
                         <li><a href="{{ route('unitMeasure.all') }}">Measurement Units</a></li>
-                        <li><a href="{{ route('postalCode.all') }}">Postal Codes</a></li>
                     </ul>
                 </li>
                 <li>

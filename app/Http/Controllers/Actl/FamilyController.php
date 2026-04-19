@@ -5,7 +5,7 @@ namespace App\Http\Controllers\Actl;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Family;
-use Auth;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Carbon;
 
 class FamilyController extends Controller
@@ -29,6 +29,7 @@ class FamilyController extends Controller
 
         Family::insert([
             'family'     => $request->family,
+            'created_by' => Auth::user()->id,
             'created_at' => Carbon::now(),
         ]);
 
@@ -52,6 +53,7 @@ class FamilyController extends Controller
 
         Family::findOrFail($family_id)->update([
             'family'     => $request->family,
+            'updated_by' => Auth::user()->id,
             'updated_at' => Carbon::now(),
         ]);
 
