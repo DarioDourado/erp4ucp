@@ -23,27 +23,18 @@
 
                 <!--- TABELAS E TRANSAÇÕES -->
                 <li class="menu-title">Tabelas</li>
-                <li>
-                    <a href="javascript: void(0);" class="has-arrow waves-effect">
-                        <i class="ri-team-line"></i>
-                        <span>Business Partners</span>
-                    </a>
-                    <ul class="sub-menu" aria-expanded="false">
-                        <li><a href="customers.html">Customers</a></li>
-                        <li><a href="leads.html">Leads</a></li>
-                    </ul>
-                </li>
+               
                 <li>
                     <a href="javascript: void(0);" class="has-arrow waves-effect">
                         <i class="ri-table-2"></i>
-                        <span>Common Tables</span>
+                        <span>Tabelas Primárias</span>
                     </a>
                     <ul class="sub-menu" aria-expanded="false">
-                        <li><a href="{{ route('postalCode.all') }}">Postal Codes</a></li>
-                        <li><a href="{{ route('supplier.all') }}">Suppliers</a></li>
-                        <li><a href="{{ route('family.all') }}">Family Products</a></li>
-                        <li><a href="{{ route('taxRate.all') }}">Tax Rates</a></li>
-                        <li><a href="{{ route('unitMeasure.all') }}">Measurement Units</a></li>
+                        <li><a href="{{ route('postalCode.all') }}">Código Postal</a></li>
+                        <li><a href="{{ route('supplier.all') }}">Fornecedores</a></li>
+                        <li><a href="{{ route('family.all') }}">Familia</a></li>
+                        <li><a href="{{ route('taxRate.all') }}">Taxas de IVA</a></li>
+                        <li><a href="{{ route('unitMeasure.all') }}">Unidades de Medida</a></li>
                     </ul>
                 </li>
                 <li>
