@@ -40,6 +40,16 @@
     
                         <div class="p-3">
 
+@if ($errors->any())
+    <div class="alert alert-danger" role="alert">
+        <ul class="mb-0">
+            @foreach ($errors->all() as $error)
+                <li>{{ $error }}</li>
+            @endforeach
+        </ul>
+    </div>
+@endif
+
 <form class="form-horizontal mt-3" method="POST" action="{{ route('register') }}">
 @csrf   
     <div class="form-group mb-3 row">

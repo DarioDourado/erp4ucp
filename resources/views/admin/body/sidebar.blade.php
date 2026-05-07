@@ -32,6 +32,7 @@
                     <ul class="sub-menu" aria-expanded="false">
                         <li><a href="{{ route('postalCode.all') }}">Código Postal</a></li>
                         <li><a href="{{ route('supplier.all') }}">Fornecedores</a></li>
+                        <li><a href="{{ route('article.all') }}">Artigos</a></li>
                         <li><a href="{{ route('family.all') }}">Familia</a></li>
                         <li><a href="{{ route('taxRate.all') }}">Taxas de IVA</a></li>
                         <li><a href="{{ route('unitMeasure.all') }}">Unidades de Medida</a></li>

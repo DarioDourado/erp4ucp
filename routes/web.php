@@ -9,6 +9,7 @@ use App\Http\Controllers\Actl\SupplierController;
 use App\Http\Controllers\Actl\FamilyController;
 use App\Http\Controllers\Actl\UnitMeasureController;
 use App\Http\Controllers\Actl\TaxRateController;
+use App\Http\Controllers\Actl\ArticleController;
 
 Route::get('/', function () {
     return redirect()->route('login');
@@ -87,6 +88,16 @@ Route::middleware(['auth'])->group(function () {
         Route::get('/taxRate/edit/{id}', 'TaxRateEdit')->name('taxRate.edit');
         Route::post('/taxRate/update', 'TaxRateUpdate')->name('taxRate.update');
         Route::get('/taxRate/delete/{id}', 'TaxRateDelete')->name('taxRate.delete');
+    });
+
+    // Article
+    Route::controller(ArticleController::class)->group(function () {
+        Route::get('/article/all', 'ArticleAll')->name('article.all');
+        Route::get('/article/add', 'ArticleAdd')->name('article.add');
+        Route::post('/article/store', 'ArticleStore')->name('article.store');
+        Route::get('/article/edit/{id}', 'ArticleEdit')->name('article.edit');
+        Route::post('/article/update', 'ArticleUpdate')->name('article.update');
+        Route::get('/article/delete/{id}', 'ArticleDelete')->name('article.delete');
     });
 
 });
