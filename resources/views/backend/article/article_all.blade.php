@@ -92,6 +92,9 @@
         </div>
     </div>
 
+@endsection
+
+@push('datatable-scripts')
     <script>
         $(document).ready(function () {
             let table = null;
@@ -116,8 +119,4 @@
             });
         });
     </script>
-
-@endsection
-
-@push('datatable-scripts')
 @endpush
