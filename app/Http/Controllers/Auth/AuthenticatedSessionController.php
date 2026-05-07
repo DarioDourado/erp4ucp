@@ -28,10 +28,10 @@ class AuthenticatedSessionController extends Controller
 
         $request->session()->regenerate();
 
-        $notification = array(
-            'message' => 'Login Feito com Sucesso.', 
-            'alert-type' => 'success'
-        );
+        $notification = [
+            'message'    => 'Login Feito com Sucesso.',
+            'alert-type' => 'success',
+        ];
 
         return redirect()->intended(route('dashboard', absolute: false))->with($notification);
     }

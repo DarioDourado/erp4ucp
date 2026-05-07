@@ -7,7 +7,7 @@ use Illuminate\Http\Request;
 use App\Models\PostalCode;
 
 use Illuminate\Support\Facades\Auth;
-use illuminate\Support\Carbon;
+use Illuminate\Support\Carbon;
 
 class PostalCodeController extends Controller
 {
@@ -26,14 +26,14 @@ class PostalCodeController extends Controller
         PostalCode::insert([
             'postalCode' => $request->postalCode,
             'location' => $request->location,
-            'created_by' => AUTH::user()->id,
+            'created_by' => Auth::user()->id,
             'created_at' => Carbon::now(),
         ]);
 
-        $notification = array(
-            'message' => 'CP Adicionado Corretamente.', 
-            'alert-type' => 'success'
-        );
+        $notification = [
+            'message'    => 'CP Adicionado Corretamente.',
+            'alert-type' => 'success',
+        ];
 
          return redirect()->route('postalCode.all')->with($notification);
     }
@@ -50,14 +50,14 @@ class PostalCodeController extends Controller
         PostalCode::findOrFail($postalCode_id)->update([
             'postalCode' => $request->postalCode,
             'location' => $request->location,
-            'updated_by' => AUTH::user()->id,
+            'updated_by' => Auth::user()->id,
             'updated_at' => Carbon::now(),
         ]);
 
-        $notification = array(
-            'message' => 'CP Actualizado Corretamente.', 
-            'alert-type' => 'info'
-        );
+        $notification = [
+            'message'    => 'CP Atualizado Corretamente.',
+            'alert-type' => 'info',
+        ];
 
          return redirect()->route('postalCode.all')->with($notification);
     }
@@ -65,10 +65,10 @@ class PostalCodeController extends Controller
      public function PostalCodeDelete($id){
         PostalCode::findOrFail($id)->delete();
 
-        $notification = array(
-            'message' => 'CP Eliminado Corretamente.', 
-            'alert-type' => 'success'
-        );
+        $notification = [
+            'message'    => 'CP Eliminado Corretamente.',
+            'alert-type' => 'success',
+        ];
 
          return redirect()->route('postalCode.all')->with($notification);
     }

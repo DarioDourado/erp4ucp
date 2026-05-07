@@ -26,7 +26,7 @@
 
                         <br><br>
 
-                        <h4 class="card-title">Family Products All Data</h4>
+                        <h4 class="card-title">Famílias de Produtos — Todos os Registos</h4>
 
                         <table id="datatable"
                                class="table table-bordered dt-responsive nowrap"
@@ -35,8 +35,8 @@
                             <thead>
                                 <tr>
                                     <th>Ln</th>
-                                    <th>Family</th>
-                                    <th>Action</th>
+                                    <th>Família</th>
+                                    <th>Ação</th>
                                 </tr>
                             </thead>
 
