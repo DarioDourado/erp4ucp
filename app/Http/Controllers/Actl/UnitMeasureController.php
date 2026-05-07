@@ -24,11 +24,11 @@ class UnitMeasureController extends Controller
     public function UnitMeasureStore(Request $request)
     {
         $request->validate([
-            'unity' => 'required|unique:UnitMeasure,unity',
+            'unit' => 'required|unique:UnitMeasure,unit',
         ]);
 
         UnitMeasure::insert([
-            'unity'      => $request->unity,
+            'unit'      => $request->unit,
             'created_at' => Carbon::now(),
         ]);
 
@@ -51,7 +51,7 @@ class UnitMeasureController extends Controller
         $unitMeasure_id = $request->id;
 
         UnitMeasure::findOrFail($unitMeasure_id)->update([
-            'unity'      => $request->unity,
+            'unit'      => $request->unit,
             'updated_at' => Carbon::now(),
         ]);
 

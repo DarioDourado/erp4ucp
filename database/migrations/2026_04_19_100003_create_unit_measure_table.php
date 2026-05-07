@@ -10,7 +10,7 @@ return new class extends Migration
     {
         Schema::create('UnitMeasure', function (Blueprint $table) {
             $table->id();
-            $table->string('unity', 25)->unique();
+            $table->string('unit', 25)->unique();
             $table->timestamps();
         });
     }

@@ -11,6 +11,9 @@
     <!-- App favicon -->
     <link rel="shortcut icon" href="{{ asset('backend/assets/images/favicon.ico') }}">
 
+    <!-- select2 Component -->
+    <link href="{{ asset('backend/assets/libs/select2/css/select2.min.css') }}" rel="stylesheet" type="text/css">
+
     <!-- jquery.vectormap css -->
     <link href="{{ asset('backend/assets/libs/admin-resources/jquery.vectormap/jquery-jvectormap-1.2.2.css') }}" rel="stylesheet" type="text/css" />
 
@@ -119,6 +122,8 @@
         <script src="{{ asset('backend/assets/js/pages/dashboard.init.js') }}"></script>
     @endif
 
+    <script src="{{ asset('backend/assets/libs/select2/js/select2.min.js') }}"></script>
+    
     @stack('datatable-scripts')
     @stack('scripts')
 

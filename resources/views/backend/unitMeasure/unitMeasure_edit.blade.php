@@ -18,9 +18,9 @@
                             <input type="hidden" name="id" value="{{ $unitMeasure->id }}">
 
                             <div class="row mb-3">
-                                <label for="unity" class="col-sm-2 col-form-label">Unidade</label>
+                                <label for="unit" class="col-sm-2 col-form-label">Unidade</label>
                                 <div class="form-group col-sm-10">
-                                    <input id="unity" name="unity" class="form-control" type="text" value="{{ $unitMeasure->unity }}" autofocus>
+                                    <input id="unit" name="unit" class="form-control" type="text" value="{{ $unitMeasure->unit }}" autofocus>
                                 </div>
                             </div>
 
@@ -40,10 +40,10 @@
     $(document).ready(function () {
         $('#myForm').validate({
             rules: {
-                unity: { required: true }
+                unit: { required: true }
             },
             messages: {
-                unity: { required: 'A Unidade é obrigatória.' }
+                unit: { required: 'A Unidade é obrigatória.' }
             },
             errorElement: 'span',
             errorPlacement: function (error, element) {

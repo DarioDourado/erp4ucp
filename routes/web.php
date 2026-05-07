@@ -9,7 +9,8 @@ use App\Http\Controllers\Actl\SupplierController;
 use App\Http\Controllers\Actl\FamilyController;
 use App\Http\Controllers\Actl\UnitMeasureController;
 use App\Http\Controllers\Actl\TaxRateController;
-use App\Http\Controllers\Actl\ArticleController;
+use App\Http\Controllers\Actl\ProductController;
+use App\Http\Controllers\Actl\PurchaseOrderController;
 
 Route::get('/', function () {
     return redirect()->route('login');
@@ -90,14 +91,26 @@ Route::middleware(['auth'])->group(function () {
         Route::get('/taxRate/delete/{id}', 'TaxRateDelete')->name('taxRate.delete');
     });
 
-    // Article
-    Route::controller(ArticleController::class)->group(function () {
-        Route::get('/article/all', 'ArticleAll')->name('article.all');
-        Route::get('/article/add', 'ArticleAdd')->name('article.add');
-        Route::post('/article/store', 'ArticleStore')->name('article.store');
-        Route::get('/article/edit/{id}', 'ArticleEdit')->name('article.edit');
-        Route::post('/article/update', 'ArticleUpdate')->name('article.update');
-        Route::get('/article/delete/{id}', 'ArticleDelete')->name('article.delete');
+    // Artigos
+    Route::controller(ProductController::class)->group(function () {
+        Route::get('/product/all', 'ProductAll')->name('product.all');
+        Route::get('/product/add', 'ProductAdd')->name('product.add');
+        Route::post('/product/store', 'ProductStore')->name('product.store');
+        Route::get('/product/edit/{id}', 'ProductEdit')->name('product.edit');
+        Route::post('/product/update', 'ProductUpdate')->name('product.update');
+        Route::get('/product/delete/{id}', 'ProductDelete')->name('product.delete');
+    });
+
+    // Encomendas a Fornecedores
+    Route::controller(PurchaseOrderController::class)->group(function () {
+        Route::get('/purchaseOrder/all', 'PurchaseOrderAll')->name('purchaseOrder.all');
+        Route::get('/purchaseOrder/analytics', 'PurchaseOrderAnalytics')->name('purchaseOrder.analytics');
+        Route::get('/purchaseOrder/add', 'PurchaseOrderAdd')->name('purchaseOrder.add');
+        Route::get('/purchaseOrder/pdf/{id}', 'PurchaseOrderPdf')->name('purchaseOrder.pdf');
+        Route::post('/purchaseOrder/store', 'PurchaseOrderStore')->name('purchaseOrder.store');
+        Route::get('/purchaseOrder/edit/{id}', 'PurchaseOrderEdit')->name('purchaseOrder.edit');
+        Route::post('/purchaseOrder/update', 'PurchaseOrderUpdate')->name('purchaseOrder.update');
+        Route::get('/purchaseOrder/delete/{id}', 'PurchaseOrderDelete')->name('purchaseOrder.delete');
     });
 
 });
