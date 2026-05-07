@@ -97,17 +97,6 @@
                                     </div>
                                 </div>
 
-                                <div class="row mb-3">
-                                    <label for="nif" class="col-sm-2 col-form-label">NIF</label>
-                                    <div class="form-group col-sm-10">
-                                        <input id="nif" name="nif" class="form-control @error('nif') is-invalid @enderror"
-                                            type="text" value="{{ old('nif') }}">
-                                        @error('nif')
-                                            <span class="invalid-feedback d-block">{{ $message }}</span>
-                                        @enderror
-                                    </div>
-                                </div>
-
                                 <input type="submit" class="btn btn-info waves-effect waves-light"
                                     value="Atualizar Fornecedor">
                             </form>
@@ -123,11 +112,11 @@
     @push('scripts')
         <script type="text/javascript">
             $(document).ready(function () {
-                $('.select2').select2(
+                $('.select2').select2({
                     placeholder: 'Selecione ...',
                     allowClear: true,
                     width: '100%'
-                );
+                });
 
                 $('#myForm').validate({
                     rules: {

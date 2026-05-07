@@ -10,7 +10,7 @@
                 <div class="card">
                     <div class="card-body">
 
-                        <h4 class="card-title">Edit Tax Rate</h4>
+                        <h4 class="card-title">Editar Taxa de IVA</h4>
                         <br><br>
 
                         <form method="post" action="{{ route('taxRate.update') }}" id="myForm">
@@ -18,14 +18,14 @@
                             <input type="hidden" name="id" value="{{ $taxRate->id }}">
 
                             <div class="row mb-3">
-                                <label for="taxRateCode" class="col-sm-2 col-form-label">Tax Rate Code</label>
+                                <label for="taxRateCode" class="col-sm-2 col-form-label">Código de IVA</label>
                                 <div class="form-group col-sm-10">
                                     <input id="taxRateCode" name="taxRateCode" class="form-control" type="number" value="{{ $taxRate->taxRateCode }}" autofocus>
                                 </div>
                             </div>
 
                             <div class="row mb-3">
-                                <label for="descriptionTaxRate" class="col-sm-2 col-form-label">Description Tax Rate</label>
+                                <label for="descriptionTaxRate" class="col-sm-2 col-form-label">Descrição</label>
                                 <div class="form-group col-sm-10">
                                     <input id="descriptionTaxRate" name="descriptionTaxRate" class="form-control" type="text" value="{{ $taxRate->descriptionTaxRate }}">
                                 </div>
@@ -38,7 +38,7 @@
                                 </div>
                             </div>
 
-                            <input type="submit" class="btn btn-info waves-effect waves-light" value="Update Tax Rate">
+                            <input type="submit" class="btn btn-info waves-effect waves-light" value="Atualizar Taxa de IVA">
                         </form>
 
                     </div>
@@ -59,9 +59,9 @@
                 taxRate:            { required: true }
             },
             messages: {
-                taxRateCode:        { required: 'Please Enter Tax Rate Code.' },
-                descriptionTaxRate: { required: 'Please Enter Tax Rate Description.' },
-                taxRate:            { required: 'Please Enter Tax Rate %.' }
+                taxRateCode:        { required: 'O Código de IVA é obrigatório.' },
+                descriptionTaxRate: { required: 'A Descrição é obrigatória.' },
+                taxRate:            { required: 'A Taxa de IVA (%) é obrigatória.' }
             },
             errorElement: 'span',
             errorPlacement: function (error, element) {

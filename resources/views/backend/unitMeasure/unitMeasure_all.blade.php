@@ -26,7 +26,7 @@
 
                         <br><br>
 
-                        <h4 class="card-title">Unit Measure All Data</h4>
+                        <h4 class="card-title">Unidades de Medida — Todos os Registos</h4>
 
                         <table id="datatable"
                                class="table table-bordered dt-responsive nowrap"
@@ -35,8 +35,8 @@
                             <thead>
                                 <tr>
                                     <th>Ln</th>
-                                    <th>Unity</th>
-                                    <th>Action</th>
+                                    <th>Unidade</th>
+                                    <th>Ação</th>
                                 </tr>
                             </thead>
 

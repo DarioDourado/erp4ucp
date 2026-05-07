@@ -17,10 +17,10 @@ class AdminController extends Controller
 
         $request->session()->regenerateToken();
 
-        $notification = array(
-            'message' => 'Logout Efetuado Com Sucesso.', 
-            'alert-type' => 'success'
-        );
+        $notification = [
+            'message'    => 'Logout Efetuado Com Sucesso.',
+            'alert-type' => 'success',
+        ];
 
         return redirect('/login')->with($notification);
     } // End Method 
@@ -57,10 +57,10 @@ class AdminController extends Controller
         }
         $data->save();
 
-        $notification = array(
-            'message' => 'Perfil Do Utilizador Atualizado Com Sucesso.', 
-            'alert-type' => 'info'
-        );
+        $notification = [
+            'message'    => 'Perfil Do Utilizador Atualizado Com Sucesso.',
+            'alert-type' => 'info',
+        ];
 
         return redirect()->route('admin.profile')->with($notification);
 
@@ -84,16 +84,22 @@ class AdminController extends Controller
         ]);
 
         $hashedPassword = Auth::user()->password;
-        if (Hash::check($request->oldpassword,$hashedPassword )) {
+        if (Hash::check($request->oldpassword, $hashedPassword)) {
             $users = User::find(Auth::id());
             $users->password = bcrypt($request->newpassword);
             $users->save();
 
-            session()->flash('message','Password Atualizada Com Sucesso.');
-            return redirect()->back();
-        } else{
-            session()->flash('message','As Passwords Não Coincidem.');
-            return redirect()->back();
+            $notification = [
+                'message'    => 'Password Atualizada Com Sucesso.',
+                'alert-type' => 'success',
+            ];
+            return redirect()->back()->with($notification);
+        } else {
+            $notification = [
+                'message'    => 'As Passwords Não Coincidem.',
+                'alert-type' => 'error',
+            ];
+            return redirect()->back()->with($notification);
         }
 
     }// End Method
