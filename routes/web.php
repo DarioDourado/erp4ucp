@@ -118,6 +118,9 @@ Route::middleware(['auth'])->group(function () {
     Route::controller(GoodsReceiptController::class)->group(function () {
         Route::get('/goodsReceipt/all', 'GoodsReceiptAll')->name('goodsReceipt.all');
         Route::get('/goodsReceipt/add', 'GoodsReceiptAdd')->name('goodsReceipt.add');
+        Route::get('/goodsReceipt/ocr', 'showOCR')->name('goodsReceipt.ocr');
+        Route::post('/goodsReceipt/upload-document', 'uploadDocument')->name('goodsReceipt.uploadDocument');
+        Route::get('/goodsReceipt/test-ocr', 'testOCR')->name('goodsReceipt.testOCR');
         Route::get('/goodsReceipt/selectPurchaseOrder', 'GoodsReceiptSelectPurchaseOrder')->name('goodsReceipt.selectPurchaseOrder');
         Route::get('/goodsReceipt/pdf/{id}', 'GoodsReceiptPdf')->name('goodsReceipt.pdf');
         Route::post('/goodsReceipt/store', 'GoodsReceiptStore')->name('goodsReceipt.store');
