@@ -11,6 +11,7 @@ use App\Http\Controllers\Actl\UnitMeasureController;
 use App\Http\Controllers\Actl\TaxRateController;
 use App\Http\Controllers\Actl\ProductController;
 use App\Http\Controllers\Actl\PurchaseOrderController;
+use App\Http\Controllers\Actl\GoodsReceiptController;
 
 Route::get('/', function () {
     return redirect()->route('login');
@@ -111,6 +112,18 @@ Route::middleware(['auth'])->group(function () {
         Route::get('/purchaseOrder/edit/{id}', 'PurchaseOrderEdit')->name('purchaseOrder.edit');
         Route::post('/purchaseOrder/update', 'PurchaseOrderUpdate')->name('purchaseOrder.update');
         Route::get('/purchaseOrder/delete/{id}', 'PurchaseOrderDelete')->name('purchaseOrder.delete');
+    });
+
+    // Entradas de Mercadoria
+    Route::controller(GoodsReceiptController::class)->group(function () {
+        Route::get('/goodsReceipt/all', 'GoodsReceiptAll')->name('goodsReceipt.all');
+        Route::get('/goodsReceipt/add', 'GoodsReceiptAdd')->name('goodsReceipt.add');
+        Route::get('/goodsReceipt/selectPurchaseOrder', 'GoodsReceiptSelectPurchaseOrder')->name('goodsReceipt.selectPurchaseOrder');
+        Route::get('/goodsReceipt/pdf/{id}', 'GoodsReceiptPdf')->name('goodsReceipt.pdf');
+        Route::post('/goodsReceipt/store', 'GoodsReceiptStore')->name('goodsReceipt.store');
+        Route::get('/goodsReceipt/edit/{id}', 'GoodsReceiptEdit')->name('goodsReceipt.edit');
+        Route::post('/goodsReceipt/update', 'GoodsReceiptUpdate')->name('goodsReceipt.update');
+        Route::get('/goodsReceipt/annul/{id}', 'GoodsReceiptAnnul')->name('goodsReceipt.annul');
     });
 
 });

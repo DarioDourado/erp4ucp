@@ -1,0 +1,133 @@
+.select2-container {
+    width: 100% !important;
+}
+
+.select2-container .select2-selection--single {
+    height: calc(1.5em + .94rem + 2px) !important;
+    padding: .47rem .75rem !important;
+    border: 1px solid #ced4da !important;
+    display: flex !important;
+    align-items: center !important;
+}
+
+.select2-container .select2-selection__rendered {
+    line-height: 1.5 !important;
+    padding-left: 0 !important;
+    padding-right: 20px !important;
+    font-size: .875rem;
+}
+
+.order-lines-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+}
+
+#goodsReceiptLinesTable {
+    min-width: 1300px;
+    margin-bottom: 0;
+}
+
+#goodsReceiptLinesTable thead th {
+    white-space: nowrap;
+    background: #f8fafc;
+    color: #334155;
+    font-weight: 700;
+    border-bottom: 1px solid #dbe4f0;
+}
+
+#goodsReceiptLinesTable td,
+#goodsReceiptLinesTable th {
+    vertical-align: middle;
+}
+
+.section-card {
+    border: 1px solid #dbe4f0;
+    border-radius: 16px;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+}
+
+.footer-observation-panel,
+.totals-card,
+.vat-summary-wrapper {
+    padding: 0;
+    height: 100%;
+}
+
+.footer-observation-panel textarea {
+    min-height: 232px;
+    resize: vertical;
+}
+
+.totals-panel-card {
+    border: 1px solid #dbe4f0;
+    border-radius: 12px;
+    padding: 12px;
+    background: #f8fbff;
+}
+
+.totals-panel {
+    display: grid;
+    gap: 12px;
+}
+
+.total-box {
+    border: 1px solid #dde7f2;
+    border-radius: 12px;
+    background: #ffffff;
+    min-height: 80px;
+    overflow: hidden;
+}
+
+.total-box .card-body {
+    position: relative;
+    padding: 12px 14px;
+    min-height: 96px;
+}
+
+.total-box-highlight {
+    background: linear-gradient(135deg, #0f5fd7 0%, #3784ff 100%);
+    border-color: #0f5fd7;
+}
+
+.total-label {
+    display: block;
+    font-size: .85rem;
+    color: #64748b;
+    margin-bottom: 0;
+    text-align: left;
+    position: absolute;
+    top: 12px;
+    left: 14px;
+}
+
+.total-value {
+    display: block;
+    font-size: 1.65rem;
+    font-weight: 800;
+    line-height: 1;
+    color: #0f172a;
+    text-align: right;
+    position: absolute;
+    right: 14px;
+    bottom: 12px;
+}
+
+.total-box-highlight .total-label,
+.total-box-highlight .total-value {
+    color: #fff;
+}
+
+.vat-summary-table thead th {
+    background: #f8fafc;
+    color: #334155;
+    font-weight: 700;
+}
+
+@media (max-width: 991.98px) {
+    .footer-observation-panel textarea {
+        min-height: 180px;
+    }
+}
