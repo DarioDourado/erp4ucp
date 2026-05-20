@@ -3,7 +3,7 @@
 @section('admin')
 
 @php
-    $selectedSupplierCode = old('supplierCode');
+    $selectedSupplierCode = old('supplierCode', $ocrSupplierCode ?? null);
     $selectedSupplierName = optional($suppliers->firstWhere('code', $selectedSupplierCode))->name;
 @endphp
 
@@ -76,7 +76,7 @@
                                             @foreach($suppliers as $supplier)
                                                 <option value="{{ $supplier->code }}"
                                                         data-name="{{ $supplier->name }}"
-                                                        {{ (string) old('supplierCode') === (string) $supplier->code ? 'selected' : '' }}>
+                                                        {{ (string) old('supplierCode') === (string) $supplier->code || (filled($selectedSupplierCode) && (string) $selectedSupplierCode === (string) $supplier->code) ? 'selected' : '' }}>
                                                     {{ $supplier->code }} - {{ $supplier->name }}
                                                 </option>
                                             @endforeach
@@ -210,75 +210,96 @@
 
                             <div class="row g-4 align-items-stretch">
                                 <div class="col-lg-4">
-                                    <div class="footer-panel footer-observation-panel">
-                                        <label for="pOObservation" class="form-label">Observações</label>
-                                        <textarea id="pOObservation"
-                                                  name="pOObservation"
-                                                  class="form-control @error('pOObservation') is-invalid @enderror"
-                                                  rows="8"
-                                                  placeholder="Observações gerais da encomenda...">{{ old('pOObservation') }}</textarea>
-                                        @error('pOObservation')
-                                            <span class="invalid-feedback d-block">{{ $message }}</span>
-                                        @enderror
-                                    </div>
-                                </div>
-
-                                <div class="col-lg-4">
-                                    <div class="vat-summary-wrapper">
-                                        <div class="d-flex justify-content-between align-items-center mb-2">
-                                            <h5 class="mb-0">Resumo IVA</h5>
-                                            <small class="text-muted">Agrupado por código</small>
-                                        </div>
-
-                                        <div class="table-responsive">
-                                            <table class="table table-sm mb-0 vat-summary-table" id="taxSummaryTable">
-                                                <thead>
-                                                    <tr>
-                                                        <th>Cód. IVA</th>
-                                                        <th>Taxa</th>
-                                                        <th class="text-end">Valor IVA</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    <tr id="emptyTaxSummaryRow">
-                                                        <td colspan="3" class="text-center text-muted py-3">
-                                                            Sem linhas para calcular IVA.
-                                                        </td>
-                                                    </tr>
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="col-lg-4">
-                                    <div class="totals-card">
-                                        <div class="mb-3 form-group">
-                                            <label for="financialDiscount" class="form-label">Desconto Financeiro</label>
-                                            <input id="financialDiscount"
-                                                   name="financialDiscount"
-                                                   type="number"
-                                                   step="0.01"
-                                                   min="0"
-                                                   class="form-control text-end @error('financialDiscount') is-invalid @enderror"
-                                                   value="{{ old('financialDiscount', 0) }}">
-                                            @error('financialDiscount')
+                                    <div class="card h-100 section-card">
+                                        <div class="card-body footer-observation-panel">
+                                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                                <h5 class="mb-0">Observações</h5>
+                                            </div>
+                                            <label for="pOObservation" class="form-label visually-hidden">Observações</label>
+                                            <textarea id="pOObservation"
+                                                      name="pOObservation"
+                                                      class="form-control @error('pOObservation') is-invalid @enderror"
+                                                      rows="8"
+                                                      placeholder="Observações gerais da encomenda...">{{ old('pOObservation') }}</textarea>
+                                            @error('pOObservation')
                                                 <span class="invalid-feedback d-block">{{ $message }}</span>
                                             @enderror
                                         </div>
+                                    </div>
+                                </div>
 
-                                        <div class="totals-panel">
-                                            <div class="total-box">
-                                                <span class="total-label">Total Líquido</span>
-                                                <span class="total-value" id="totalNetDisplay">0,00</span>
+                                <div class="col-lg-4">
+                                    <div class="card h-100 section-card">
+                                        <div class="card-body vat-summary-wrapper">
+                                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                                <h5 class="mb-0">Resumo IVA</h5>
+                                                <small class="text-muted">Agrupado por taxa</small>
                                             </div>
-                                            <div class="total-box">
-                                                <span class="total-label">Total IVA</span>
-                                                <span class="total-value" id="totalTaxDisplay">0,00</span>
+
+                                            <div class="table-responsive">
+                                                <table class="table table-sm mb-0 vat-summary-table" id="taxSummaryTable">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>Cód. IVA</th>
+                                                            <th>Taxa</th>
+                                                            <th class="text-end">Valor IVA</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        <tr id="emptyTaxSummaryRow">
+                                                            <td colspan="3" class="text-center text-muted py-3">
+                                                                Sem linhas para calcular IVA.
+                                                            </td>
+                                                        </tr>
+                                                    </tbody>
+                                                </table>
                                             </div>
-                                            <div class="total-box total-box-highlight">
-                                                <span class="total-label">Total Geral</span>
-                                                <span class="total-value" id="totalGrossDisplay">0,00</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="col-lg-4">
+                                    <div class="card h-100 section-card">
+                                        <div class="card-body totals-card">
+                                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                                <h5 class="mb-0">Totais</h5>
+                                            </div>
+
+                                            <div class="mb-3 form-group">
+                                                <label for="financialDiscount" class="form-label">Desconto Financeiro</label>
+                                                <input id="financialDiscount"
+                                                       name="financialDiscount"
+                                                       type="number"
+                                                       step="0.01"
+                                                       min="0"
+                                                       class="form-control text-end @error('financialDiscount') is-invalid @enderror"
+                                                       value="{{ old('financialDiscount', 0) }}">
+                                                @error('financialDiscount')
+                                                    <span class="invalid-feedback d-block">{{ $message }}</span>
+                                                @enderror
+                                            </div>
+
+                                            <div class="totals-panel-card">
+                                                <div class="totals-panel">
+                                                    <div class="total-box card">
+                                                        <div class="card-body d-flex flex-column justify-content-between">
+                                                            <span class="total-label d-block text-start">Total Líquido</span>
+                                                            <span class="total-value d-block w-100 text-end fw-bold fs-3" id="totalNetDisplay">0,00</span>
+                                                        </div>
+                                                    </div>
+                                                    <div class="total-box card">
+                                                        <div class="card-body d-flex flex-column justify-content-between">
+                                                            <span class="total-label d-block text-start">Total IVA</span>
+                                                            <span class="total-value d-block w-100 text-end fw-bold fs-3" id="totalTaxDisplay">0,00</span>
+                                                        </div>
+                                                    </div>
+                                                    <div class="total-box total-box-highlight card">
+                                                        <div class="card-body d-flex flex-column justify-content-between">
+                                                            <span class="total-label d-block text-start">Total Geral</span>
+                                                            <span class="total-value d-block w-100 text-end fw-bold fs-3" id="totalGrossDisplay">0,00</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>

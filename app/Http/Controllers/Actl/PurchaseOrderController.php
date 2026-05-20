@@ -9,15 +9,19 @@ use App\Models\Supplier;
 use App\Models\Product;
 use App\Models\Family;
 use App\Models\TaxRate;
+use App\Models\UnitMeasure;
 use App\Models\PurchaseOrderC;
 use App\Models\PurchaseOrderD;
 use App\Models\StockMovement;
 
+use App\Services\OcrService;
 use Auth;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use thiagoalessio\TesseractOCR\TesseractOCR;
 
 class PurchaseOrderController extends Controller
 {
@@ -53,20 +57,38 @@ class PurchaseOrderController extends Controller
         ));
     }
 
-    public function PurchaseOrderAdd()
+    public function PurchaseOrderAdd(Request $request)
     {
         $suppliers = $this->getSuppliers();
         $families = $this->getFamilies();
         $products = $this->getProductsForForm();
         $nextPONumber = ((int) PurchaseOrderC::max('pONumber')) + 1;
+
+        // --- OCR pre-fill: verificar se há dados de OCR em sessão ---
+        $ocrData = session('ocr_purchase_order_data');
+        $ocrSupplierCode = $request->query('supplier_code');
         $initialLines = $this->normalizeLinesForForm(collect(old('lines', [])));
+
+        if ($ocrData && empty(old())) {
+            $ocrSupplierCode = $ocrData['supplier']['code'] ?? $ocrSupplierCode;
+            $initialLines = collect($ocrData['lines'] ?? [])
+                ->map(function ($line) {
+                    return [
+                        'productCode' => (string) ($line['productCode'] ?? ''),
+                        'quantity' => (float) ($line['quantity'] ?? 1),
+                        'unitPrice' => (float) ($line['unitPrice'] ?? 0),
+                    ];
+                })
+                ->values();
+        }
 
         return view('backend.purchaseOrder.purchaseOrderC_add', compact(
             'suppliers',
             'families',
             'products',
             'nextPONumber',
-            'initialLines'
+            'initialLines',
+            'ocrSupplierCode'
         ));
     }
 
@@ -592,5 +614,928 @@ class PurchaseOrderController extends Controller
                 'averageSatisfaction' => $averageSatisfaction,
             ],
         ];
+    }
+
+    // ========================================================================
+    //  OCR — Leitura de Documentos de Fornecedor
+    // ========================================================================
+
+    /**
+     * Exibe a página de OCR para leitura de documentos de fornecedor.
+     */
+    public function showPurchaseOrderOCR()
+    {
+        return view('backend.purchaseOrder.purchaseOrder_ocr');
+    }
+
+    /**
+     * Endpoint de teste que processa um PDF de exemplo e retorna JSON.
+     */
+    public function testPurchaseOrderOCR()
+    {
+        $testPdfPath = public_path('documents/test_invoice.pdf');
+
+        if (!file_exists($testPdfPath)) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Ficheiro de teste não encontrado: documents/test_invoice.pdf',
+            ]);
+        }
+
+        $requestId = 'test-' . uniqid();
+        $text = $this->extractTextFromDocument($testPdfPath, $requestId);
+        $parsedData = $this->parsePurchaseOrderDocument($text, $requestId);
+        $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($parsedData, $requestId);
+
+        return response()->json([
+            'success' => true,
+            'requestId' => $requestId,
+            'rawText' => $text,
+            'parsed' => $parsedData,
+            'enriched' => $enrichedData,
+        ]);
+    }
+
+    /**
+     * Processa o upload de um documento (imagem ou PDF) e retorna dados
+     * estruturados (fornecedor + linhas) prontos para criar uma encomenda.
+     *
+     * Primeiro tenta o OCR Service (Tesseract + preprocessing + Ollama LLM).
+     * Se o serviço não estiver disponível, cai para o Tesseract direto.
+     */
+    public function uploadPurchaseOrderDocument(Request $request)
+    {
+        $request->validate([
+            'document' => 'required|file|mimes:jpg,jpeg,png,pdf|max:10240',
+        ]);
+
+        $requestId = 'po-ocr-' . uniqid();
+        $file = $request->file('document');
+
+        // ── Passo 1: Tentar o OCR Service (Python microservice) ──────────
+        try {
+            $ocrService = app(OcrService::class);
+            $result = $ocrService->analyzeDocument($file);
+
+            if ($result['success']) {
+                $parsed = $result['data']['parsed'] ?? [];
+                $rawText = $result['data']['raw_text'] ?? '';
+
+                Log::info('[PO-OCR] Serviço OCR usado com sucesso.', [
+                    'requestId' => $requestId,
+                    'supplier' => $parsed['supplier']['name'] ?? 'unknown',
+                    'lines' => count($parsed['lines'] ?? []),
+                ]);
+
+                // Converter formato do LLM para o formato esperado pelo enriquecimento
+                $convertedData = $this->convertLLMFormatToInternal($parsed);
+
+                // Enriquece com dados da base de dados
+                $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($convertedData, $requestId);
+
+                // Guarda os dados em sessão para preencher o formulário
+                session()->flash('ocr_purchase_order_data', $enrichedData);
+
+                return response()->json([
+                    'success' => true,
+                    'requestId' => $requestId,
+                    'rawText' => $rawText,
+                    'parsed' => $convertedData,
+                    'enriched' => $enrichedData,
+                    'ocr_service' => 'python_microservice',
+                ]);
+            }
+
+            // Serviço disponível mas falhou — log do erro
+            Log::warning('[PO-OCR] Serviço OCR disponível mas falhou, a usar fallback Tesseract.', [
+                'requestId' => $requestId,
+                'error' => $result['error'] ?? 'unknown',
+            ]);
+        } catch (\Exception $e) {
+            Log::info('[PO-OCR] Serviço OCR não disponível, a usar fallback Tesseract.', [
+                'requestId' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        // ── Passo 2: Fallback para o Tesseract direto ─────────────────────
+        $path = $file->store('ocr-temp', 'public');
+        $fullPath = storage_path('app/public/' . $path);
+
+        try {
+            $text = $this->extractTextFromDocument($fullPath, $requestId);
+
+            if (empty(trim($text))) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'Não foi possível extrair texto do documento. ' .
+                        'Certifique-se de que a imagem tem boa resolução e contraste.',
+                ]);
+            }
+
+            $parsedData = $this->parsePurchaseOrderDocument($text, $requestId);
+            $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($parsedData, $requestId);
+
+            session()->flash('ocr_purchase_order_data', $enrichedData);
+
+            return response()->json([
+                'success' => true,
+                'requestId' => $requestId,
+                'rawText' => $text,
+                'parsed' => $parsedData,
+                'enriched' => $enrichedData,
+                'ocr_service' => 'tesseract_fallback',
+            ]);
+        } catch (\Exception $e) {
+            Log::error('[PO-OCR] Erro no processamento do documento.', [
+                'requestId' => $requestId,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => 'Erro ao processar o documento: ' . $e->getMessage(),
+            ]);
+        } finally {
+            if (file_exists($fullPath)) {
+                @unlink($fullPath);
+            }
+        }
+    }
+
+    /**
+     * Converte o formato do LLM (OCR Service) para o formato interno.
+     *
+     * O LLM devolve algo como:
+     *   { supplier: {name, nif, address}, lines: [{productCode, productDescription, quantity, unitPrice}] }
+     *
+     * O formato interno espera:
+     *   { supplier: {nome, nif}, lines: [{codigo, descricao, quantidade, precoUnitario}] }
+     */
+    private function convertLLMFormatToInternal(array $parsed): array
+    {
+        $supplier = $parsed['supplier'] ?? [];
+        $lines = $parsed['lines'] ?? [];
+
+        return [
+            'supplier' => [
+                'nome' => $supplier['name'] ?? '',
+                'nif' => $supplier['nif'] ?? '',
+                'email' => '',
+                'telefone' => '',
+                'morada' => $supplier['address'] ?? '',
+            ],
+            'lines' => array_map(function ($line) {
+                return [
+                    'codigo' => $line['productCode'] ?? '',
+                    'descricao' => $line['productDescription'] ?? '',
+                    'quantidade' => $line['quantity'] ?? 1,
+                    'precoUnitario' => $line['unitPrice'] ?? 0,
+                ];
+            }, $lines),
+            'documentDate' => $parsed['documentDate'] ?? null,
+            'documentNumber' => $parsed['documentNumber'] ?? null,
+        ];
+    }
+
+    // ========================================================================
+    //  Resolução de Entidades (Fornecedor, Artigo, TaxRate)
+    // ========================================================================
+
+    /**
+     * Procura ou cria um fornecedor com base nos dados extraídos do OCR.
+     *
+     * @param  array{nome?:string,nif?:string,email?:string,telefone?:string}  $parsedSupplier
+     * @return array{found:bool,model:Supplier}
+     */
+    private function findOrCreateSupplierFromOcr(array $parsedSupplier): array
+    {
+        $nome = $this->normalizeText($parsedSupplier['nome'] ?? '');
+        $nif = $this->normalizeText($parsedSupplier['nif'] ?? '');
+
+        // 1. Tentar encontrar por NIF (se existir)
+        if (!empty($nif)) {
+            $byNif = Supplier::where('nif', $nif)->first();
+            if ($byNif) {
+                return ['found' => true, 'model' => $byNif];
+            }
+        }
+
+        // 2. Tentar encontrar por nome (exacto ou fuzzy)
+        if (!empty($nome)) {
+            $exact = Supplier::where('name', $nome)->first();
+            if ($exact) {
+                return ['found' => true, 'model' => $exact];
+            }
+
+            $allSuppliers = Supplier::all(['code', 'name']);
+            $bestScore = 0;
+            $bestSupplier = null;
+
+            foreach ($allSuppliers as $supplier) {
+                $score = $this->calculateTextSimilarity($nome, $supplier->name);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                    $bestSupplier = $supplier;
+                }
+            }
+
+            if ($bestScore >= 60 && $bestSupplier) {
+                return ['found' => true, 'model' => $bestSupplier];
+            }
+        }
+
+        // 3. Criar fornecedor (se permitido)
+        if (!config('purchaseorder.ocr.auto_create_supplier', true)) {
+            return ['found' => false, 'model' => null];
+        }
+
+        $maxCode = (int) Supplier::max('code');
+        $newCode = $maxCode > 0 ? $maxCode + 1 : 1;
+
+        $supplier = Supplier::create([
+            'code' => $newCode,
+            'name' => !empty($nome) ? $nome : 'Fornecedor (OCR)',
+            'nif' => !empty($nif) ? $nif : null,
+            'address1' => $this->normalizeText($parsedSupplier['morada'] ?? ''),
+            'status' => 1,
+            'created_by' => Auth::id(),
+            'updated_by' => null,
+        ]);
+
+        Log::info('[PO-OCR] Fornecedor criado automaticamente.', [
+            'code' => $newCode,
+            'name' => $supplier->name,
+        ]);
+
+        return ['found' => false, 'model' => $supplier];
+    }
+
+    /**
+     * Procura ou cria um artigo com base nos dados extraídos do OCR.
+     *
+     * @param  array{codigo?:string,descricao?:string,quantidade?:float,precoUnitario?:float}  $parsedLine
+     * @return array{found:bool,model:Product}
+     */
+    private function findOrCreateProductFromOcr(array $parsedLine): array
+    {
+        $codigo = $this->normalizeText($parsedLine['codigo'] ?? '');
+        $descricao = $this->sanitizeDescription($parsedLine['descricao'] ?? '');
+        $quantidade = $this->normalizeNumber($parsedLine['quantidade'] ?? 0);
+        $precoUnitario = $this->normalizeNumber($parsedLine['precoUnitario'] ?? 0);
+
+        // 1. Tentar encontrar por código
+        if (!empty($codigo)) {
+            $byCode = Product::where('code', $codigo)->first();
+            if ($byCode) {
+                return ['found' => true, 'model' => $byCode];
+            }
+        }
+
+        // 2. Tentar encontrar por descrição (exacta ou fuzzy)
+        if (!empty($descricao)) {
+            $exact = Product::where('description', $descricao)->first();
+            if ($exact) {
+                return ['found' => true, 'model' => $exact];
+            }
+
+            $allProducts = Product::all(['code', 'description']);
+            $bestScore = 0;
+            $bestProduct = null;
+
+            foreach ($allProducts as $product) {
+                $score = $this->calculateTextSimilarity($descricao, $product->description);
+                if ($score > $bestScore) {
+                    $bestScore = $score;
+                    $bestProduct = $product;
+                }
+            }
+
+            // Limiar mais baixo para evitar falsos positivos
+            if ($bestScore >= 65 && $bestProduct) {
+                return ['found' => true, 'model' => $bestProduct];
+            }
+        }
+
+        // 3. Criar artigo (se permitido)
+        if (!config('purchaseorder.ocr.auto_create_product', true)) {
+            return ['found' => false, 'model' => null];
+        }
+
+        $family = $this->ensureDefaultFamily();
+        $unit = $this->ensureDefaultUnit();
+        $taxRateCode = $this->resolveTaxRateFromOcr(null);
+        $newCode = $this->generateProductCode();
+
+        $product = Product::create([
+            'code' => $newCode,
+            'description' => $descricao ?: 'Artigo (OCR)',
+            'family' => $family,
+            'unit' => $unit,
+            'taxRateCode' => $taxRateCode,
+            'status' => 1,
+            'created_by' => Auth::id(),
+            'updated_by' => null,
+        ]);
+
+        Log::info('[PO-OCR] Artigo criado automaticamente.', [
+            'code' => $newCode,
+            'description' => $product->description,
+            'family' => $family,
+            'unit' => $unit,
+            'taxRateCode' => $taxRateCode,
+        ]);
+
+        return ['found' => false, 'model' => $product];
+    }
+
+    /**
+     * Resolve o código de taxa de IVA.
+     *
+     * Se for fornecida uma percentagem, tenta fazer corresponder.
+     * Caso contrário, usa o código configurado como fallback.
+     */
+    private function resolveTaxRateFromOcr(?float $taxRatePercent): int
+    {
+        if ($taxRatePercent !== null && $taxRatePercent > 0) {
+            $match = TaxRate::where('taxRate', $taxRatePercent)->first();
+            if ($match) {
+                return (int) $match->taxRateCode;
+            }
+        }
+
+        return (int) config('purchaseorder.ocr.default_tax_rate_code', 1);
+    }
+
+    /**
+     * Garante que existe a família "GERAL" e retorna o nome.
+     */
+    private function ensureDefaultFamily(): string
+    {
+        $defaultFamily = config('purchaseorder.ocr.default_family', 'GERAL');
+        $exists = Family::where('family', $defaultFamily)->exists();
+
+        if (!$exists) {
+            Family::create(['family' => $defaultFamily]);
+            Log::info('[PO-OCR] Família criada automaticamente.', ['family' => $defaultFamily]);
+        }
+
+        return $defaultFamily;
+    }
+
+    /**
+     * Garante que existe a unidade "UN" e retorna a sigla.
+     */
+    private function ensureDefaultUnit(): string
+    {
+        $defaultUnit = config('purchaseorder.ocr.default_unit', 'UN');
+        $exists = UnitMeasure::where('unit', $defaultUnit)->exists();
+
+        if (!$exists) {
+            UnitMeasure::create(['unit' => $defaultUnit]);
+            Log::info('[PO-OCR] Unidade criada automaticamente.', ['unit' => $defaultUnit]);
+        }
+
+        return $defaultUnit;
+    }
+
+    /**
+     * Gera um código de artigo auto-incrementado com prefixo.
+     */
+    private function generateProductCode(): string
+    {
+        $prefix = config('purchaseorder.ocr.product_code_prefix', 'ART-');
+        $allCodes = Product::where('code', 'like', $prefix . '%')
+            ->get('code')
+            ->map(function ($product) use ($prefix) {
+                return (int) str_replace($prefix, '', $product->code);
+            });
+
+        $maxNum = $allCodes->max() ?: 0;
+        $nextNum = $maxNum + 1;
+
+        return $prefix . $nextNum;
+    }
+
+    // ========================================================================
+    //  Parsing do Texto OCR
+    // ========================================================================
+
+    /**
+     * Interpreta o texto extraído e devolve uma estrutura normalizada:
+     *   - supplier: {nome, nif, email, telefone, morada}
+     *   - lines: [{codigo, descricao, quantidade, precoUnitario}]
+     */
+    private function parsePurchaseOrderDocument(string $text, ?string $requestId = null): array
+    {
+        $lines = explode("\n", $text);
+        $supplier = [
+            'nome' => '',
+            'nif' => '',
+            'email' => '',
+            'telefone' => '',
+            'morada' => '',
+        ];
+        $parsedLines = $this->extractPOTabularLines($text);
+        $linhasEncontradas = count($parsedLines);
+
+        // --- Extração de metadados do fornecedor ---
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+
+            // NIF — tolera espaços entre dígitos (ex: "500 123 456")
+            // Primeiro tenta o padrão com label e dígitos consecutivos
+            if (preg_match('/\b(?:NIF|Contribuinte|Fiscal\s*N[oº]?)\s*[:\s]*(\d{9})\b/i', $trimmed, $m)) {
+                $supplier['nif'] = $m[1];
+            }
+            // Depois tenta com espaços (ex: "500 123 456")
+            elseif (preg_match('/\b(?:NIF|Contribuinte|Fiscal\s*N[oº]?)\s*[:\s]*(\d{3})\s*(\d{3})\s*(\d{3})\b/i', $trimmed, $m)) {
+                $supplier['nif'] = $m[1] . $m[2] . $m[3];
+            }
+
+            // Email
+            if (preg_match('/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/', $trimmed, $m)) {
+                $supplier['email'] = $m[0];
+            }
+
+            // Contacto / telefone
+            if (empty($supplier['telefone']) && preg_match('/\b(?:\+?\d{2,3}\s?)?\d{9}\b/', $trimmed, $m)) {
+                $supplier['telefone'] = $m[0];
+            }
+        }
+
+        // --- Nome do fornecedor: primeiras linhas não vazias que não pareçam cabecalho ---
+        $headerKeywords = ['fatura', 'invoice', 'recibo', 'receipt', 'encomenda', 'data', 'n[oº]'];
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+            if (empty($trimmed) || mb_strlen($trimmed) < 3) {
+                continue;
+            }
+            $isHeader = false;
+            foreach ($headerKeywords as $kw) {
+                if (preg_match('/^' . $kw . '/i', $trimmed)) {
+                    $isHeader = true;
+                    break;
+                }
+            }
+            if ($isHeader) {
+                continue;
+            }
+            // Se parece um endereço, guardar como morada
+            if (preg_match('/^(?:Rua|Av\.|Avenida|Travessa|Largo|Praça|Estrada)/i', $trimmed)) {
+                if (empty($supplier['morada'])) {
+                    $supplier['morada'] = $trimmed;
+                }
+                continue;
+            }
+            // Se parece NIF, ignorar
+            if (preg_match('/^\d{9}$/', $trimmed)) {
+                continue;
+            }
+            $supplier['nome'] = $trimmed;
+            break;
+        }
+
+        Log::info('[PO-OCR] Documento interpretado.', [
+            'requestId' => $requestId,
+            'supplier' => $supplier,
+            'linhasEncontradas' => $linhasEncontradas,
+        ]);
+
+        return [
+            'supplier' => $supplier,
+            'lines' => $parsedLines,
+        ];
+    }
+
+    /**
+     * Extrai linhas tabulares (artigos) a partir do texto OCR.
+     *
+     * Procura por padrões como:
+     *   - Código + Descrição + Quantidade + Preço
+     *   - Descrição + Quantidade + Preço
+     *   - Linhas com formato de colchetes/pipes (formatos de tabela de fornecedor)
+     *
+     * NOTA: O OCR frequëntemente extrai texto com espaços simples entre colunas
+     * (não 2+), por isso esta implementação tolera \s+ em vez de \s{2,}.
+     * A lógica usa o facto de que as últimas palavras numérica da linha são
+     * tipicamente a quantidade e o preço unitário.
+     */
+    private function extractPOTabularLines(string $text): array
+    {
+        $lines = explode("\n", $text);
+        $results = [];
+        $currentDescription = '';
+
+        foreach ($lines as $raw) {
+            $line = trim($raw);
+            if (empty($line)) {
+                continue;
+            }
+
+            // ── Passo 1: Identificar valores numéricos no final da linha ──
+            // Procura por 1 ou 2 valores decimais no fim (quantidade + preço opcional)
+            // Ex: "ART-001 Parafuso Inox M8x20 10 2,50"
+            // Ex: "1001 Arroz Agulha Cacarola kg 20 20 1,15"
+            // Ex: "Parafuso Inox M8x20 10 x 2,50"
+            $hasTrailingNumbers = preg_match(
+                '/(?P<quantidade>\d+(?:[.,]\d+)?)' .
+                '(?:\s*(?:[xX\*]\s*)?(?P<preco>\d+(?:[.,]\d+)?))?\s*$/u',
+                $line,
+                $numMatch
+            );
+
+            if ($hasTrailingNumbers && !$this->isLineExcluded($line)) {
+                $qtyStr = $numMatch['quantidade'] ?? '1';
+                $priceStr = $numMatch['preco'] ?? null;
+
+                // Extrai código se existir (no início da linha)
+                $codigo = '';
+                $descricao = $line;
+
+                // Tenta extrair código alfanumérico no início (ex: "ART-001 ", "1001 ", "0122 ")
+                if (preg_match('/^(\d{2,4}|[A-Z]+-\d+)\s+(.+)$/u', $line, $codeMatch)) {
+                    $codigo = $codeMatch[1];
+                    $descricao = $codeMatch[2];
+                }
+
+                // Remove os números do final para isolar a descrição
+                $descricao = preg_replace(
+                    '/' . preg_quote($qtyStr, '/') . '(?:\s*(?:[xX\*]\s*)?' . ($priceStr ? preg_quote($priceStr, '/') : '\d+(?:[.,]\d+)?') . ')?\s*$/u',
+                    '',
+                    $descricao
+                );
+
+                // Limpa a descrição (remove artefactos de tabela, brackets, pipes, etc.)
+                $descricao = $this->sanitizeDescription($descricao);
+
+                if (!empty($descricao)) {
+                    $results[] = [
+                        'codigo' => $codigo,
+                        'descricao' => $descricao,
+                        'quantidade' => $this->normalizeNumber($qtyStr),
+                        'precoUnitario' => $priceStr !== null ? $this->normalizeNumber($priceStr) : 0,
+                    ];
+                    $currentDescription = '';
+                    continue;
+                }
+            }
+
+            // ── Passo 2: Padrão de colchetes/pipes (formato tabela fornecedor) ──
+            // Ex: "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6%"
+            // Ex: "0551 Salsa Frisada Molho 20] UN 6%"
+            if (preg_match('/^' .
+                '(\d{2,4}|[A-Z]+-\d+)\s*' .     // Código
+                '\[?' .                           // [ opcional
+                '(.+?)' .                         // Descrição (non-greedy)
+                '(?:\|\s*)?' .                    // | opcional
+                '(\d+(?:[.,]\d+)?)\s*' .          // Quantidade
+                '(?:\[?[A-Za-z]+\]?\s*)?' .       // Unidade opcional [Cx], [KG], [UN]
+                '(\d+(?:[.,]\d+)?)\s*' .          // Preço unitário
+                '(?:\]?\s*\d+\s*%\s*.*)?$/u',     // ] VAT% e total opcionais
+                $line, $m
+            )) {
+                $descricao = $this->sanitizeDescription($m[2]);
+                if (!empty($descricao)) {
+                    $results[] = [
+                        'codigo' => $m[1],
+                        'descricao' => $descricao,
+                        'quantidade' => $this->normalizeNumber($m[3]),
+                        'precoUnitario' => $this->normalizeNumber($m[4]),
+                    ];
+                    $currentDescription = '';
+                    continue;
+                }
+            }
+
+            // ── Passo 3: Acumula descrição para linhas multi-linha ──
+            if (preg_match('/^[\s\S]{3,60}$/u', $line) && !$this->isLineExcluded($line)) {
+                $currentDescription .= ' ' . $line;
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * Verifica se uma linha OCR deve ser excluída do parsing de artigos.
+     */
+    private function isLineExcluded(string $line): bool
+    {
+        return (bool) preg_match(
+            '/(?:total|iva|subtotal|€|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.)/i',
+            $line
+        );
+    }
+
+    /**
+     * Enriquece os dados interpretados com informação da base de dados.
+     *
+     * Para cada artigo, tenta resolver o produto existente ou cria um novo.
+     * O mesmo para o fornecedor.
+     */
+    private function enrichPurchaseOrderDataWithDatabase(array $parsedData, ?string $requestId = null): array
+    {
+        // --- Fornecedor ---
+        $supplierResult = $this->findOrCreateSupplierFromOcr($parsedData['supplier'] ?? []);
+        $supplierModel = $supplierResult['model'] ?? null;
+
+        $enrichedSupplier = [
+            'code' => $supplierModel ? (string) $supplierModel->code : '',
+            'name' => $supplierModel ? $supplierModel->name : ($parsedData['supplier']['nome'] ?? ''),
+            'nif' => $supplierModel ? $supplierModel->nif : ($parsedData['supplier']['nif'] ?? ''),
+            'found' => $supplierResult['found'] ?? false,
+        ];
+
+        // --- Linhas ---
+        $enrichedLines = [];
+
+        foreach (($parsedData['lines'] ?? []) as $i => $line) {
+            $productResult = $this->findOrCreateProductFromOcr($line);
+            $productModel = $productResult['model'] ?? null;
+
+            $taxRateCode = $productModel ? (int) $productModel->taxRateCode : $this->resolveTaxRateFromOcr(null);
+            $taxRatePercent = (float) TaxRate::where('taxRateCode', $taxRateCode)->value('taxRate') ?? 0;
+
+            $enrichedLines[] = [
+                'productCode' => $productModel ? (string) $productModel->code : ($line['codigo'] ?? ''),
+                'description' => $productModel ? $productModel->description : ($line['descricao'] ?? ''),
+                'productFamily' => $productModel ? $productModel->family : $this->ensureDefaultFamily(),
+                'productUnit' => $productModel ? $productModel->unit : $this->ensureDefaultUnit(),
+                'taxRateCode' => $taxRateCode,
+                'taxRate' => $taxRatePercent,
+                'quantity' => $this->normalizeNumber($line['quantidade'] ?? 1),
+                'unitPrice' => $this->normalizeNumber($line['precoUnitario'] ?? 0),
+                'found' => $productResult['found'] ?? false,
+            ];
+        }
+
+        Log::info('[PO-OCR] Dados enriquecidos com BD.', [
+            'requestId' => $requestId,
+            'supplier' => $enrichedSupplier,
+            'linesCount' => count($enrichedLines),
+        ]);
+
+        return [
+            'supplier' => $enrichedSupplier,
+            'lines' => $enrichedLines,
+        ];
+    }
+
+    // ========================================================================
+    //  Extração de Texto (Documento / PDF / Imagem)
+    // ========================================================================
+
+    /**
+     * Extrai texto de um ficheiro (PDF ou imagem).
+     */
+    private function extractTextFromDocument(string $path, ?string $requestId = null): string
+    {
+        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+
+        if ($extension === 'pdf') {
+            return $this->extractTextFromPdf($path, $requestId);
+        }
+
+        return $this->runTesseractOnImage($path, $requestId);
+    }
+
+    /**
+     * Extrai texto de um PDF convertendo para imagem com pdftoppm e aplicando OCR.
+     */
+    private function extractTextFromPdf(string $pdfPath, ?string $requestId = null): string
+    {
+        if (!$this->isCommandAvailable('pdftoppm')) {
+            Log::warning('[PO-OCR] pdftoppm não está disponível.', ['requestId' => $requestId]);
+            return '';
+        }
+
+        $tempDir = storage_path('app/temp-ocr-' . uniqid());
+        if (!is_dir($tempDir)) {
+            mkdir($tempDir, 0755, true);
+        }
+
+        try {
+            $outputBase = $tempDir . '/page';
+            $cmd = sprintf(
+                'pdftoppm -png -r 300 "%s" "%s" 2>&1',
+                $pdfPath,
+                $outputBase
+            );
+            exec($cmd, $output, $exitCode);
+
+            if ($exitCode !== 0) {
+                Log::error('[PO-OCR] Erro pdftoppm.', [
+                    'requestId' => $requestId,
+                    'exitCode' => $exitCode,
+                    'output' => implode("\n", $output),
+                ]);
+                return '';
+            }
+
+            $images = glob($tempDir . '/page-*.png');
+            if (empty($images)) {
+                $images = glob($tempDir . '/*.png');
+            }
+            sort($images);
+
+            $fullText = '';
+
+            foreach ($images as $imagePath) {
+                $pageText = $this->runTesseractOnImage($imagePath, $requestId);
+                $fullText .= $pageText . "\n--- PAGE BREAK ---\n";
+            }
+
+            return trim($fullText);
+        } finally {
+            if (is_dir($tempDir)) {
+                array_map('unlink', glob($tempDir . '/*'));
+                rmdir($tempDir);
+            }
+        }
+    }
+
+    /**
+     * Aplica Tesseract OCR a uma imagem.
+     */
+    private function runTesseractOnImage(string $path, ?string $requestId = null): string
+    {
+        try {
+            $ocr = new TesseractOCR($path);
+            $ocr->lang('por');
+            $text = $ocr->run();
+
+            Log::info('[PO-OCR] Tesseract executado.', [
+                'requestId' => $requestId,
+                'path' => $path,
+                'length' => mb_strlen(trim($text)),
+            ]);
+
+            return trim($text);
+        } catch (\Exception $e) {
+            Log::error('[PO-OCR] Erro Tesseract.', [
+                'requestId' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+            return '';
+        }
+    }
+
+    /**
+     * Verifica se um comando está disponível no sistema.
+     */
+    private function isCommandAvailable(string $command): bool
+    {
+        $process = proc_open(
+            "where {$command} 2>NUL || which {$command} 2>/dev/null",
+            [
+                0 => ['pipe', 'r'],
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ],
+            $pipes
+        );
+
+        if (is_resource($process)) {
+            $stdout = stream_get_contents($pipes[1]);
+            fclose($pipes[0]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $exitCode = proc_close($process);
+
+            return $exitCode === 0 && !empty(trim($stdout));
+        }
+
+        return false;
+    }
+
+    // ========================================================================
+    //  Utilitários de Texto
+    // ========================================================================
+
+    /**
+     * Calcula a similaridade entre dois textos, combinando
+     * similar_text (PHP) com correspondência de tokens.
+     */
+    private function calculateTextSimilarity(string $left, string $right): float
+    {
+        $left = $this->normalizeText($left);
+        $right = $this->normalizeText($right);
+
+        if (empty($left) || empty($right)) {
+            return 0.0;
+        }
+
+        // Similaridade de caracteres
+        $charSimilarity = 0.0;
+        similar_text($left, $right, $charSimilarity);
+
+        // Similaridade de tokens (palavras)
+        $leftTokens = preg_split('/\s+/', $left);
+        $rightTokens = preg_split('/\s+/', $right);
+        $commonTokens = array_intersect($leftTokens, $rightTokens);
+        $totalTokens = count(array_unique(array_merge($leftTokens, $rightTokens)));
+        $tokenSimilarity = $totalTokens > 0 ? (count($commonTokens) / $totalTokens) * 100 : 0;
+
+        // Média ponderada (peso maior para tokens)
+        return ($charSimilarity * 0.3) + ($tokenSimilarity * 0.7);
+    }
+
+    /**
+     * Normaliza um texto para comparação (lowercase, trim, remove acentos).
+     */
+    private function normalizeText(string $value): string
+    {
+        $value = trim($value);
+        $value = mb_strtolower($value, 'UTF-8');
+
+        // Remove acentos
+        $value = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value);
+
+        // Remove caracteres não alfanuméricos duplicados
+        $value = preg_replace('/[^\w\s@.-]/u', ' ', $value);
+        $value = preg_replace('/\s+/', ' ', $value);
+
+        return trim($value);
+    }
+
+    /**
+     * Converte uma string com possível separador português para float.
+     * Ex: "1.234,56" → 1234.56  |  "1234.56" → 1234.56
+     */
+    private function normalizeNumber(string $value): float
+    {
+        $value = trim(str_replace(' ', '', $value));
+
+        if (empty($value)) {
+            return 0.0;
+        }
+
+        // Se tem ponto como milhar e vírgula como decimal
+        // Ex: 1.234,56
+        if (preg_match('/^\d{1,3}(?:\.\d{3})*(?:,\d+)?$/', $value)) {
+            $value = str_replace('.', '', $value);
+            $value = str_replace(',', '.', $value);
+        } elseif (str_contains($value, ',') && !str_contains($value, '.')) {
+            // Vírgula como decimal
+            $value = str_replace(',', '.', $value);
+        }
+
+        return (float) $value;
+    }
+
+    /**
+     * Limpa uma descrição extraída por OCR.
+     *
+     * Remove artefactos comuns de documentos com formato tabular:
+     * - Colchetes [ ] e pipes | usados como separadores de coluna
+     * - Percentagens e unidades que "contaminam" a descrição
+     * - Cabeçalhos de colunas tabulares
+     */
+    private function sanitizeDescription(string $value): string
+    {
+        $value = trim($value);
+
+        // 1. Remove cabeçalhos de colunas tabulares
+        $value = preg_replace(
+            '/^(?:codigo|código|artigo|referencia|ref\.?|descricao|descrição|quantidade|preco|preço|unitario|unitário)\b.*$/i',
+            '',
+            $value
+        );
+
+        // 2. Remove colchete de abertura no início
+        $value = preg_replace('/^\[/', '', $value);
+
+        // 3. Remove tudo após um colchete de fecho (fim da célula da tabela)
+        //    Ex: "Couve Coração Seleção | 12[UN|oss| 6%" → "Couve Coração Seleção"
+        $value = preg_replace('/\s*\].*$/', '', $value);
+
+        // 4. Remove pipe + conteúdo residual (unidades, percentagens, etc.)
+        //    Ex: "Batata Monalisa Sac 10kg | 5[Cx]" → "Batata Monalisa Sac 10kg"
+        //    Ex: " | ex]" → já tratado acima, mas pipe sozinho também
+        $value = preg_replace('/\s*\|\s*\d*\[?[A-Za-z]*(?:\]?\s*\d*\s*%?.*)?$/', '', $value);
+
+        // 5. Remove pipes ao final
+        $value = preg_replace('/\s*\|\s*$/', '', $value);
+
+        // 6. Remove percentagens no final (ex: " 6%", " 23%")
+        $value = preg_replace('/\s*\d+\s*%\s*$/', '', $value);
+
+        // 7. Remove conteúdos entre colchetes (ex: [UN], [Cx], [KG])
+        $value = preg_replace('/\s*\[[^\]]*\]/', '', $value);
+
+        // 8. Remove parêntesis de fecho no final
+        $value = preg_replace('/\s*\)\s*$/', '', $value);
+
+        // 9. Remove múltiplos espaços
+        $value = preg_replace('/\s+/', ' ', $value);
+
+        // 10. Limita a 100 caracteres
+        if (mb_strlen($value) > 100) {
+            $value = mb_substr($value, 0, 100);
+        }
+
+        return trim($value);
     }
 }

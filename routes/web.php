@@ -112,6 +112,10 @@ Route::middleware(['auth'])->group(function () {
         Route::get('/purchaseOrder/edit/{id}', 'PurchaseOrderEdit')->name('purchaseOrder.edit');
         Route::post('/purchaseOrder/update', 'PurchaseOrderUpdate')->name('purchaseOrder.update');
         Route::get('/purchaseOrder/delete/{id}', 'PurchaseOrderDelete')->name('purchaseOrder.delete');
+        // OCR
+        Route::get('/purchaseOrder/ocr', 'showPurchaseOrderOCR')->name('purchaseOrder.ocr');
+        Route::post('/purchaseOrder/upload-document', 'uploadPurchaseOrderDocument')->name('purchaseOrder.uploadDocument');
+        Route::get('/purchaseOrder/test-ocr', 'testPurchaseOrderOCR')->name('purchaseOrder.testOCR');
     });
 
     // Entradas de Mercadoria
