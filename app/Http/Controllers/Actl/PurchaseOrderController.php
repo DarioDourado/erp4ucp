@@ -693,6 +693,44 @@ class PurchaseOrderController extends Controller
                 // Enriquece com dados da base de dados
                 $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($convertedData, $requestId);
 
+                // Verifica se as linhas têm preços válidos (> 0).
+                // Se o LLM não extraiu preços, tenta o parser regex PHP
+                $hasPrices = collect($enrichedData['lines'] ?? [])
+                    ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
+
+                $usePhpFallback = !$hasPrices && !empty($rawText);
+
+                if ($usePhpFallback) {
+                    Log::info('[PO-OCR] LLM não extraiu preços, a tentar parser PHP.', [
+                        'requestId' => $requestId,
+                        'rawTextLen' => strlen($rawText),
+                    ]);
+
+                    $phpParsedData = $this->parsePurchaseOrderDocument($rawText, $requestId);
+                    $phpEnrichedData = $this->enrichPurchaseOrderDataWithDatabase($phpParsedData, $requestId);
+
+                    $phpHasPrices = collect($phpEnrichedData['lines'] ?? [])
+                        ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
+
+                    if ($phpHasPrices) {
+                        Log::info('[PO-OCR] Parser PHP extraiu preços, a usar resultado.', [
+                            'requestId' => $requestId,
+                            'lines' => count($phpEnrichedData['lines']),
+                        ]);
+
+                        session()->flash('ocr_purchase_order_data', $phpEnrichedData);
+
+                        return response()->json([
+                            'success' => true,
+                            'requestId' => $requestId,
+                            'rawText' => $rawText,
+                            'parsed' => $phpParsedData,
+                            'enriched' => $phpEnrichedData,
+                            'ocr_service' => 'python_microservice_with_php_fallback',
+                        ]);
+                    }
+                }
+
                 // Guarda os dados em sessão para preencher o formulário
                 session()->flash('ocr_purchase_order_data', $enrichedData);
 
@@ -1134,15 +1172,48 @@ class PurchaseOrderController extends Controller
                 continue;
             }
 
-            // ── Passo 1: Identificar valores numéricos no final da linha ──
-            // Procura por 1 ou 2 valores decimais no fim (quantidade + preço opcional)
+            // ── Passo 1: Padrão de colchetes/pipes (formato tabela fornecedor) ──
+            // Ex: "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6%"
+            // Ex: "0551 Salsa Frisada Molho 20] UN 6%"
+            // NOTA: O regex usa descrição non-greedy (.+?) para isolar código + qtd/preço.
+            if (preg_match('/^' .
+                '(\d{2,4}|[A-Z]+-\d+)\s*' .     // Código
+                '\[?' .                           // [ opcional
+                '(.+?)' .                         // Descrição (non-greedy para priorizar o código + qtd/preço)
+                '(?:[\s\[\|]+)?' .                // Separadores entre descrição e números
+                '(\d+(?:[.,]\d+)?)\s*' .          // Quantidade
+                '(?:\[?[A-Za-z]+\]?\s*)?' .       // Unidade opcional [Cx], [KG], [UN]
+                '(\d+(?:[.,]\d+)?)\s*' .          // Preço unitário
+                '(?:\]?\s*\d+\s*%\s*.*)?$/u',     // ] VAT% e total opcionais
+                $line, $m
+            )) {
+                $descricao = $this->sanitizeDescription($m[2]);
+                if (!empty($descricao)) {
+                    $results[] = [
+                        'codigo' => $m[1],
+                        'descricao' => $descricao,
+                        'quantidade' => $this->normalizeNumber($m[3]),
+                        'precoUnitario' => $this->normalizeNumber($m[4]),
+                    ];
+                    $currentDescription = '';
+                    continue;
+                }
+            }
+
+            // ── Passo 2: Padrão com números no fim da linha ──
             // Ex: "ART-001 Parafuso Inox M8x20 10 2,50"
             // Ex: "1001 Arroz Agulha Cacarola kg 20 20 1,15"
             // Ex: "Parafuso Inox M8x20 10 x 2,50"
+            // Limpa artefactos de fim de linha (totais, IVA%, €) antes de capturar qtd/preço
+            $cleanedLine = $line;
+            $cleanedLine = preg_replace('/\s*\d+\s*%\s*(?:\|\s*\d+(?:[.,]\d+)?)?\s*\)?\s*$/u', '', $cleanedLine);
+            $cleanedLine = preg_replace('/\s*\|\s*\d+(?:[.,]\d+)?\s*\)?\s*$/u', '', $cleanedLine);
+            $cleanedLine = preg_replace('/\s*\d+(?:[.,]\d+)?\s*€\s*$/u', '', $cleanedLine);
+
             $hasTrailingNumbers = preg_match(
                 '/(?P<quantidade>\d+(?:[.,]\d+)?)' .
                 '(?:\s*(?:[xX\*]\s*)?(?P<preco>\d+(?:[.,]\d+)?))?\s*$/u',
-                $line,
+                $cleanedLine,
                 $numMatch
             );
 
@@ -1152,10 +1223,10 @@ class PurchaseOrderController extends Controller
 
                 // Extrai código se existir (no início da linha)
                 $codigo = '';
-                $descricao = $line;
+                $descricao = $cleanedLine;
 
                 // Tenta extrair código alfanumérico no início (ex: "ART-001 ", "1001 ", "0122 ")
-                if (preg_match('/^(\d{2,4}|[A-Z]+-\d+)\s+(.+)$/u', $line, $codeMatch)) {
+                if (preg_match('/^(\d{2,4}|[A-Z]+-\d+)\s+(.+)$/u', $cleanedLine, $codeMatch)) {
                     $codigo = $codeMatch[1];
                     $descricao = $codeMatch[2];
                 }
@@ -1176,33 +1247,6 @@ class PurchaseOrderController extends Controller
                         'descricao' => $descricao,
                         'quantidade' => $this->normalizeNumber($qtyStr),
                         'precoUnitario' => $priceStr !== null ? $this->normalizeNumber($priceStr) : 0,
-                    ];
-                    $currentDescription = '';
-                    continue;
-                }
-            }
-
-            // ── Passo 2: Padrão de colchetes/pipes (formato tabela fornecedor) ──
-            // Ex: "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6%"
-            // Ex: "0551 Salsa Frisada Molho 20] UN 6%"
-            if (preg_match('/^' .
-                '(\d{2,4}|[A-Z]+-\d+)\s*' .     // Código
-                '\[?' .                           // [ opcional
-                '(.+?)' .                         // Descrição (non-greedy)
-                '(?:\|\s*)?' .                    // | opcional
-                '(\d+(?:[.,]\d+)?)\s*' .          // Quantidade
-                '(?:\[?[A-Za-z]+\]?\s*)?' .       // Unidade opcional [Cx], [KG], [UN]
-                '(\d+(?:[.,]\d+)?)\s*' .          // Preço unitário
-                '(?:\]?\s*\d+\s*%\s*.*)?$/u',     // ] VAT% e total opcionais
-                $line, $m
-            )) {
-                $descricao = $this->sanitizeDescription($m[2]);
-                if (!empty($descricao)) {
-                    $results[] = [
-                        'codigo' => $m[1],
-                        'descricao' => $descricao,
-                        'quantidade' => $this->normalizeNumber($m[3]),
-                        'precoUnitario' => $this->normalizeNumber($m[4]),
                     ];
                     $currentDescription = '';
                     continue;

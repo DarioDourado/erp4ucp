@@ -27,26 +27,40 @@ SYSTEM_PROMPT = """You are a specialized document understanding AI for Portugues
 
 Your task is to analyze OCR text extracted from a purchase order document and extract structured data.
 
+CRITICAL RULE — EXTRACT EVERY LINE:
+- You MUST extract EVERY SINGLE product line present in the document. Do NOT skip or omit any line.
+- Count how many product lines exist in the OCR text, and ensure your output contains the same number.
+- If the OCR text shows 5 product references, your JSON must have 5 entries in the "lines" array.
+- For bracket/pipe format tables, each row is a separate line — extract them ALL.
+
 Rules:
 1. Extract ONLY the information that is clearly present in the text.
 2. For the supplier name, look for text near labels like "FORNECEDOR:", "Fornecedor", "Supplier".
 3. For NIF, extract exactly 9 digits (remove any spaces or punctuation).
 4. For dates, format as YYYY-MM-DD.
-5. For product lines, extract the product code, description, quantity, and unit price.
-6. If a field cannot be determined, use null or empty string.
+5. For each product line found in the document, extract: product code, description, quantity, unit price.
+6. If a field cannot be determined, use null or empty string — but still include the line if any data is present.
 7. Respond in VALID JSON format only, without any additional text or markdown formatting.
 8. The response must be a valid JSON object that can be parsed directly.
 
 IMPORTANT: The text comes from OCR and may have recognition errors. Use context to infer the correct values. Portuguese text may have accented characters that were misrecognized.
 
 NOTE ABOUT TABLE FORMATS: Supplier documents often use table-like formats with brackets [ ] and pipes | to separate columns.
-For example: "0122 [Batata Monalisa Sac 10kg | 8,60] 6% | 42,50"
-The pattern is typically: CODE [DESCRIPTION | QTY] UN [PRICE | VAT% | TOTAL]
-Parse these by looking for the product code (usually 3-4 digits), the description (text between [ and |), and numeric values for quantity/price."""
+For example a line like: "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
+Should be parsed as: code="0122", description="Batata Monalisa Sac 10kg", quantity=5, unitPrice=8.60
+
+The pattern is: CODE [DESCRIPTION | QTY unit PRICE] VAT% | TOTAL
+- CODE comes first (2-4 digits)
+- DESCRIPTION is between [ and | (or between [ and first numeric if no |)
+- QTY is the first number after the description separator
+- PRICE is the number after the QTY/unit
+- Ignore VAT percentages (6%, 23%, etc.) and totals at the end of each line
+
+Parse EVERY line with this format, even if some lines have garbled OCR text due to recognition errors."""
 
 # Few-shot examples to guide the model
 FEW_SHOT_EXAMPLES = """
-Example 1:
+Example 1 (simple format):
 Input text:
 ```
 ENCOMENDA Nº 2025/058
@@ -84,7 +98,7 @@ Output:
   "totalGross": null
 }
 
-Example 2:
+Example 2 (table with headers):
 Input text:
 ```
 FACTURA Nº FT-2025/123
@@ -131,7 +145,7 @@ Output:
   "totalGross": null
 }
 
-Example 3 (table format with brackets):
+Example 3 (bracket/pipe table format — extract ALL 5 lines):
 Input text:
 ```
 0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)
@@ -143,49 +157,56 @@ Input text:
 
 Output:
 {
-"supplier": {
-  "name": null,
-  "nif": null,
-  "address": null
-},
-"documentDate": null,
-"documentNumber": null,
-"lines": [
-  {
-    "productCode": "0122",
-    "productDescription": "Batata Monalisa Sac 10kg",
-    "quantity": 5.0,
-    "unitPrice": 8.60
+  "supplier": {
+    "name": null,
+    "nif": null,
+    "address": null
   },
-  {
-    "productCode": "0344",
-    "productDescription": "Tomate Chucha Amad. 25KG",
-    "quantity": 25.0,
-    "unitPrice": 1.85
-  },
-  {
-    "productCode": "0091",
-    "productDescription": "Cebola Doce Pérola",
-    "quantity": 15.0,
-    "unitPrice": 1.40
-  },
-  {
-    "productCode": "1102",
-    "productDescription": "Couve Coração Seleção",
-    "quantity": 12.0,
-    "unitPrice": 0.98
-  },
-  {
-    "productCode": "0551",
-    "productDescription": "Salsa Frisada Molho",
-    "quantity": 20.0,
-    "unitPrice": null
-  }
-],
-"totalNet": null,
-"totalGross": null
+  "documentDate": null,
+  "documentNumber": null,
+  "lines": [
+    {
+      "productCode": "0122",
+      "productDescription": "Batata Monalisa Sac 10kg",
+      "quantity": 5.0,
+      "unitPrice": 8.60
+    },
+    {
+      "productCode": "0344",
+      "productDescription": "Tomate Chucha Amad. 25KG",
+      "quantity": 25.0,
+      "unitPrice": 1.85
+    },
+    {
+      "productCode": "0091",
+      "productDescription": "Cebola Doce Pérola",
+      "quantity": 15.0,
+      "unitPrice": 1.40
+    },
+    {
+      "productCode": "1102",
+      "productDescription": "Couve Coração Seleção",
+      "quantity": 12.0,
+      "unitPrice": 0.98
+    },
+    {
+      "productCode": "0551",
+      "productDescription": "Salsa Frisada Molho",
+      "quantity": 20.0,
+      "unitPrice": null
+    }
+  ],
+  "totalNet": null,
+  "totalGross": null
 }
-"""
+
+IMPORTANT: Notice that in Example 3, ALL 5 lines are extracted even when:
+- Line 2 has garbled OCR text around the numbers (Tomate Chucha Amad. 25KG)
+- Line 5 has a different format (no brackets, code+description+number at end)
+- Some lines have quantity embedded with unit markers like [Cx], [KG], [UN]
+- Some unit prices are followed by VAT% and totals
+
+ALWAYS extract every line from the document — never skip any product entry."""
 
 
 @dataclass
@@ -255,7 +276,7 @@ OCR Text:
                 "stream": False,
                 "options": {
                     "temperature": temperature,
-                    "num_predict": 2048,
+                    "num_predict": 4096,
                 },
             },
             timeout=120,
@@ -270,10 +291,23 @@ OCR Text:
         parsed = _extract_json_from_llm_output(llm_output)
 
         if parsed:
-            return _convert_to_parsed_document(parsed)
-        else:
-            logger.warning("LLM did not return valid JSON, using fallback parsing")
-            return _fallback_parse(ocr_text)
+            doc = _convert_to_parsed_document(parsed)
+            fallback_doc = _fallback_parse(ocr_text)
+
+            llm_lines = len(doc.lines)
+            fb_lines = len(fallback_doc.lines)
+
+            llm_prices = sum(1 for l in doc.lines if l.get('unitPrice'))
+            fb_prices = sum(1 for l in fallback_doc.lines if l.get('unitPrice'))
+
+            if fb_lines > llm_lines or fb_prices > llm_prices:
+                logger.warning(
+                    f"Preferring fallback result over LLM "
+                    f"(LLM: {llm_lines} lines / {llm_prices} prices, "
+                    f"Fallback: {fb_lines} lines / {fb_prices} prices)"
+                )
+                return fallback_doc
+            return doc
 
     except requests.exceptions.ConnectionError:
         logger.error(f"Cannot connect to Ollama at {ollama_url}")
@@ -472,26 +506,92 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
         if not line_stripped:
             continue
 
-        # Normalise: replace comma decimal with dot for parsing,
-        # but keep original line for bracket parsing below
+        # Preprocess for number extraction
         line_clean = line.replace('€', '').replace(',', '.').strip()
 
-        # ── Pattern A: Simple format — CODE DESCRIPTION QTY PRICE ──
-        m = re.match(
-            r'^(\d{3,})\s+'              # Product code (3+ digits)
-            r'(.+?)\s+'                   # Description (non-greedy)
-            r'(\d+(?:\.\d+)?)\s+'         # Quantity
-            r'(\d+(?:\.\d+)?)\s*$',       # Unit price
+        # ── Pattern A: Simple format — CODE DESCRIPTION + trailing numbers ──
+        # Strategy: extract leading code, then ALL trailing numeric tokens,
+        # then use heuristics to identify quantity vs price vs total.
+        code_m = re.match(r'^(\d{3,})\s+', line_clean)
+        if code_m:
+            code = code_m.group(1)
+            rest = line_clean[code_m.end():].strip()
+
+            # Extract only TRAILING contiguous numeric tokens
+            # (avoid capturing numbers embedded in the description)
+            trailing_match = re.search(r'((?:\d+(?:\.\d+)?(?:\s+|$))+)\s*$', rest)
+            if trailing_match:
+                num_tokens = re.findall(r'\d+(?:\.\d+)?', trailing_match.group(1))
+            else:
+                num_tokens = []
+
+            if len(num_tokens) >= 2:
+                # Take the trailing numeric groups
+                # Heuristic: if 3+ trailing numbers, the last is often a total
+                #   price is typically the one before the total (or the last if 2 numbers)
+                if len(num_tokens) >= 4:
+                    # Format: ... QTY_ORDERED QTY_CONFIRMED PRICE TOTAL
+                    # or:     ... QTY_ORDERED QTY_CONFIRMED PRICE
+                    # Use 3rd-from-last as quantity, 2nd-from-last as price
+                    qty_idx = -3
+                    price_idx = -2
+                elif len(num_tokens) >= 3:
+                    # Could be: ... QTY PRICE TOTAL or ... QTY_CONFIRMED PRICE
+                    # Check if last is much larger than second-last (total relationship)
+                    try:
+                        second_last = float(num_tokens[-2])
+                        last = float(num_tokens[-1])
+                        if second_last > 0 and last / second_last > 1.5:
+                            # last is probably a total (e.g. 20 * 1.15 = 23.00)
+                            qty_idx = -3
+                            price_idx = -2
+                        else:
+                            qty_idx = -3
+                            price_idx = -1
+                    except (ValueError, ZeroDivisionError):
+                        qty_idx = -3
+                        price_idx = -1
+                else:
+                    # 2 trailing numbers: QTY PRICE
+                    qty_idx = -2
+                    price_idx = -1
+
+                qty_str = num_tokens[qty_idx]
+                price_str = num_tokens[price_idx]
+
+                # Extract description by removing trailing numeric tokens
+                desc = rest
+                for tok in reversed(num_tokens):
+                    desc = re.sub(r'\s*' + re.escape(tok) + r'\s*$', '', desc, count=1)
+                desc = desc.strip()
+
+                if desc:
+                    doc.lines.append({
+                        "productCode": code,
+                        "productDescription": _clean_description(desc),
+                        "quantity": _to_float(qty_str),
+                        "unitPrice": _to_float(price_str),
+                    })
+                    continue
+
+        # ── Pattern A-fallback: Original simple regex for 2-number lines ──
+        m_simple = re.match(
+            r'^(\d{3,})\s+'
+            r'(.+?)\s+'
+            r'(\d+(?:\.\d+)?)\s+'
+            r'(\d+(?:\.\d+)?)\s*$',
             line_clean
         )
-        if m:
-            doc.lines.append({
-                "productCode": m.group(1),
-                "productDescription": _clean_description(m.group(2)),
-                "quantity": float(m.group(3)),
-                "unitPrice": float(m.group(4)),
-            })
-            continue
+        if m_simple:
+            desc = m_simple.group(2).strip()
+            if desc and not re.match(r'^(?:TOTAL|SUBTOTAL|IVA)', desc, re.IGNORECASE):
+                doc.lines.append({
+                    "productCode": m_simple.group(1),
+                    "productDescription": _clean_description(desc),
+                    "quantity": float(m_simple.group(3)),
+                    "unitPrice": float(m_simple.group(4)),
+                })
+                continue
 
         # ── Pattern B: Bracket/pipe table format ──
         # Format: CODE [DESCRIPTION | ...QTY... PRICE] VAT% | TOTAL
