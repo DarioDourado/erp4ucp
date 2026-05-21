@@ -34,7 +34,7 @@ class OcrService
     public function __construct()
     {
         $this->baseUrl = config('services.ocr.base_url', 'http://127.0.0.1:5050');
-        $this->ollamaModel = config('services.ocr.ollama_model', 'qwen2.5-coder:3b');
+        $this->ollamaModel = config('services.ocr.ollama_model', 'qwen2.5:7b');
         $this->timeout = config('services.ocr.timeout', 120);
     }
 

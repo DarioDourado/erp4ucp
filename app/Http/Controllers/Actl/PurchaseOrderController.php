@@ -657,6 +657,54 @@ class PurchaseOrderController extends Controller
     }
 
     /**
+     * Atualiza os dados OCR na sessão após o utilizador editar os campos.
+     */
+    public function updatePurchaseOrderOCRData(Request $request)
+    {
+        $validated = $request->validate([
+            'supplier.name' => 'sometimes|string|max:255',
+            'supplier.nif' => 'sometimes|string|max:20',
+            'lines' => 'sometimes|array',
+            'lines.*.productCode' => 'sometimes|string|max:50',
+            'lines.*.description' => 'sometimes|string|max:500',
+            'lines.*.quantity' => 'sometimes|numeric|min:0',
+            'lines.*.unitPrice' => 'sometimes|numeric|min:0',
+        ]);
+
+        $ocrData = session('ocr_purchase_order_data', []);
+
+        if ($request->has('supplier.name')) {
+            $ocrData['supplier']['name'] = $request->input('supplier.name');
+        }
+        if ($request->has('supplier.nif')) {
+            $ocrData['supplier']['nif'] = $request->input('supplier.nif');
+        }
+
+        if ($request->has('lines')) {
+            foreach ($request->input('lines') as $i => $editedLine) {
+                if (isset($ocrData['lines'][$i])) {
+                    if (isset($editedLine['productCode'])) {
+                        $ocrData['lines'][$i]['productCode'] = $editedLine['productCode'];
+                    }
+                    if (isset($editedLine['description'])) {
+                        $ocrData['lines'][$i]['description'] = $editedLine['description'];
+                    }
+                    if (isset($editedLine['quantity'])) {
+                        $ocrData['lines'][$i]['quantity'] = (float) $editedLine['quantity'];
+                    }
+                    if (isset($editedLine['unitPrice'])) {
+                        $ocrData['lines'][$i]['unitPrice'] = (float) $editedLine['unitPrice'];
+                    }
+                }
+            }
+        }
+
+        session()->flash('ocr_purchase_order_data', $ocrData);
+
+        return response()->json(['success' => true]);
+    }
+
+    /**
      * Processa o upload de um documento (imagem ou PDF) e retorna dados
      * estruturados (fornecedor + linhas) prontos para criar uma encomenda.
      *
@@ -1103,6 +1151,26 @@ class PurchaseOrderController extends Controller
             }
         }
 
+        // --- Procura label FORNECEDOR: antes da heurística da primeira linha ---
+        foreach ($lines as $line) {
+            if (preg_match('/\bFORNECEDOR:\s*(.+)/i', $line, $m)) {
+                $nome = trim($m[1]);
+                $nome = preg_replace('/\s+\d{2}\/\d{2}\/\d{4}.*$/', '', $nome);
+                $nome = preg_replace('/\s+NIF:.*$/i', '', $nome);
+                $nome = preg_replace('/\s+CONTACTO:.*$/i', '', $nome);
+                $supplier['nome'] = trim($nome);
+                break;
+            }
+        }
+
+        // --- Data da encomenda ---
+        foreach ($lines as $line) {
+            if (preg_match('/DATA\s+DA\s+ENCOMENDA:\s*(\d{2})[\/\-](\d{2})[\/\-](\d{4})/i', $line, $m)) {
+                $supplier['dataEncomenda'] = "{$m[3]}-{$m[2]}-{$m[1]}";
+                break;
+            }
+        }
+
         // --- Nome do fornecedor: primeiras linhas não vazias que não pareçam cabecalho ---
         $headerKeywords = ['fatura', 'invoice', 'recibo', 'receipt', 'encomenda', 'data', 'n[oº]'];
         foreach ($lines as $line) {
@@ -1144,6 +1212,7 @@ class PurchaseOrderController extends Controller
         return [
             'supplier' => $supplier,
             'lines' => $parsedLines,
+            'documentDate' => $supplier['dataEncomenda'] ?? null,
         ];
     }
 
@@ -1184,7 +1253,7 @@ class PurchaseOrderController extends Controller
                 '(\d+(?:[.,]\d+)?)\s*' .          // Quantidade
                 '(?:\[?[A-Za-z]+\]?\s*)?' .       // Unidade opcional [Cx], [KG], [UN]
                 '(\d+(?:[.,]\d+)?)\s*' .          // Preço unitário
-                '(?:\]?\s*\d+\s*%\s*.*)?$/u',     // ] VAT% e total opcionais
+                '(?:\s+.*)?$/u',     // Conteúdo final opcional (IVA%, totais, etc.)
                 $line, $m
             )) {
                 $descricao = $this->sanitizeDescription($m[2]);
@@ -1204,49 +1273,69 @@ class PurchaseOrderController extends Controller
             // Ex: "ART-001 Parafuso Inox M8x20 10 2,50"
             // Ex: "1001 Arroz Agulha Cacarola kg 20 20 1,15"
             // Ex: "Parafuso Inox M8x20 10 x 2,50"
-            // Limpa artefactos de fim de linha (totais, IVA%, €) antes de capturar qtd/preço
-            $cleanedLine = $line;
+            // Remove € de toda a linha ANTES de qualquer parsing (ex: "1,15€" -> "1,15")
+            $lineNoEuro = str_replace('€', '', $line);
+            $cleanedLine = $lineNoEuro;
+            // Limpa artefactos de fim de linha (totais, IVA%) antes de capturar qtd/preço
             $cleanedLine = preg_replace('/\s*\d+\s*%\s*(?:\|\s*\d+(?:[.,]\d+)?)?\s*\)?\s*$/u', '', $cleanedLine);
             $cleanedLine = preg_replace('/\s*\|\s*\d+(?:[.,]\d+)?\s*\)?\s*$/u', '', $cleanedLine);
-            $cleanedLine = preg_replace('/\s*\d+(?:[.,]\d+)?\s*€\s*$/u', '', $cleanedLine);
 
+            // Extrai código se existir (no início da linha)
+            $codigo = '';
+            $descricao = $cleanedLine;
+            if (preg_match('/^(\d{2,4}|[A-Z]+-\d+)\s+(.+)$/u', $cleanedLine, $codeMatch)) {
+                $codigo = $codeMatch[1];
+                $descricao = $codeMatch[2];
+            }
+
+            // Extrai apenas os números NO FINAL da descrição (ignora números embutidos
+            // como "10" em "10kg" ou "8" em "M8x20").
+            // O "x" entre qtd e preço (ex: "10 x 2,50") também é suportado.
             $hasTrailingNumbers = preg_match(
-                '/(?P<quantidade>\d+(?:[.,]\d+)?)' .
-                '(?:\s*(?:[xX\*]\s*)?(?P<preco>\d+(?:[.,]\d+)?))?\s*$/u',
-                $cleanedLine,
-                $numMatch
+                '/((?:\d+(?:[.,]\d+)?(?:\s+(?:[xX\*]\s*)?|\s*$)){2,})$/u',
+                $descricao,
+                $trailingMatch
             );
 
-            if ($hasTrailingNumbers && !$this->isLineExcluded($line)) {
-                $qtyStr = $numMatch['quantidade'] ?? '1';
-                $priceStr = $numMatch['preco'] ?? null;
+            if ($hasTrailingNumbers && !$this->isLineExcluded($lineNoEuro)) {
+                $trailingStr = trim($trailingMatch[1]);
+                $trailingNumbers = preg_split('/\s+/', $trailingStr);
+                $tCount = count($trailingNumbers);
 
-                // Extrai código se existir (no início da linha)
-                $codigo = '';
-                $descricao = $cleanedLine;
-
-                // Tenta extrair código alfanumérico no início (ex: "ART-001 ", "1001 ", "0122 ")
-                if (preg_match('/^(\d{2,4}|[A-Z]+-\d+)\s+(.+)$/u', $cleanedLine, $codeMatch)) {
-                    $codigo = $codeMatch[1];
-                    $descricao = $codeMatch[2];
-                }
-
-                // Remove os números do final para isolar a descrição
-                $descricao = preg_replace(
-                    '/' . preg_quote($qtyStr, '/') . '(?:\s*(?:[xX\*]\s*)?' . ($priceStr ? preg_quote($priceStr, '/') : '\d+(?:[.,]\d+)?') . ')?\s*$/u',
-                    '',
-                    $descricao
-                );
-
-                // Limpa a descrição (remove artefactos de tabela, brackets, pipes, etc.)
+                // Remove TODOS os números do final da descrição (genérico, não depende de qtd/preço específico)
+                $descricao = substr($descricao, 0, -strlen($trailingMatch[1]));
                 $descricao = $this->sanitizeDescription($descricao);
 
                 if (!empty($descricao)) {
+                    // Determina qty e price a partir dos números do final
+                    if ($tCount >= 4) {
+                        // 4+ números no final: qtd_encomendada qtd_confirmada preco_unit total
+                        $qtyStr = $trailingNumbers[0];
+                        $priceStr = $trailingNumbers[$tCount - 2];
+                    } elseif ($tCount == 3) {
+                        // 3 números no final: pode ser [qtd, preco, total] ou [qtd, extra, preco]
+                        $lastNum = $this->normalizeNumber($trailingNumbers[2]);
+                        $secondLastNum = $this->normalizeNumber($trailingNumbers[1]);
+                        if ($secondLastNum > 0 && $lastNum / $secondLastNum > 1.5) {
+                            // Relação total/preco > 1.5: [qtd, preco, total]
+                            $qtyStr = $trailingNumbers[0];
+                            $priceStr = $trailingNumbers[1];
+                        } else {
+                            // [qtd, extra (ex: qtd recebida), preco] — preco é o último
+                            $qtyStr = $trailingNumbers[0];
+                            $priceStr = $trailingNumbers[2];
+                        }
+                    } else {
+                        // 2 números no final: [qtd, preco]
+                        $qtyStr = $trailingNumbers[0];
+                        $priceStr = $trailingNumbers[1];
+                    }
+
                     $results[] = [
                         'codigo' => $codigo,
                         'descricao' => $descricao,
                         'quantidade' => $this->normalizeNumber($qtyStr),
-                        'precoUnitario' => $priceStr !== null ? $this->normalizeNumber($priceStr) : 0,
+                        'precoUnitario' => $this->normalizeNumber($priceStr),
                     ];
                     $currentDescription = '';
                     continue;
@@ -1268,7 +1357,7 @@ class PurchaseOrderController extends Controller
     private function isLineExcluded(string $line): bool
     {
         return (bool) preg_match(
-            '/(?:total|iva|subtotal|€|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.)/i',
+            '/(?:total|iva|subtotal|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.)/i',
             $line
         );
     }

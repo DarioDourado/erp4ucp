@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import pytesseract
+import re
 from pathlib import Path
 import logging
 
@@ -171,9 +172,10 @@ def correct_perspective(image: np.ndarray) -> np.ndarray:
     keystone distortion). Without correction, text farther from the camera
     becomes compressed and unreadable by OCR.
 
-    **Safeguard**: if the detected quadrilateral covers less than 25% of the
-    total image area, it likely represents an inner content region rather than
-    the full document page. In this case perspective correction is **skipped**
+    **Safeguard**: if the detected quadrilateral covers less than 65% of the
+    total image area (after perspective warp + 15% margin expansion), it likely
+    represents an inner content region (e.g. a table or box) rather than the
+    full document page. In this case perspective correction is **skipped**
     and the original image is returned — a bad perspective crop is worse than
     no correction at all. All other enhancements (CLAHE, sharpening, etc.) are
     still applied later in the pipeline.
@@ -200,7 +202,7 @@ def correct_perspective(image: np.ndarray) -> np.ndarray:
     warped_area = warped.shape[0] * warped.shape[1]
     area_ratio = warped_area / total_area
 
-    MIN_AREA_RATIO = 0.50  # at least 50% of original image area — stricter threshold
+    MIN_AREA_RATIO = 0.65  # at least 65% of original image area — avoids cropping to inner regions
 
     if area_ratio < MIN_AREA_RATIO:
         logger.warning(
@@ -213,7 +215,7 @@ def correct_perspective(image: np.ndarray) -> np.ndarray:
     logger.info(
         f"Perspective correction APPLIED: "
         f"{width}x{height} -> {warped.shape[1]}x{warped.shape[0]} "
-        f"(ratio={area_ratio:.1%})"
+        f"(ratio={area_ratio:.1%}, threshold={MIN_AREA_RATIO:.0%})"
     )
     return warped
 
@@ -380,57 +382,17 @@ def preprocess_image(image_path: str | Path,
     return gray
 
 
-def extract_text_with_layout(image_path: str | Path) -> dict:
+def _assemble_lines_from_ocr_data(ocr_data: dict) -> list[dict]:
     """
-    Extract text from an image using Tesseract OCR with layout analysis.
-
-    Returns both raw text and structured data with bounding boxes.
-
-    Args:
-        image_path: Path to the input image
-
-    Returns:
-        dict with keys:
-            - raw_text: Full extracted text
-            - lines: List of {text, bbox (x, y, w, h), conf}
-            - tables: Detected tabular regions with cells
+    Assemble structured lines from pytesseract OCR data.
+    Shared helper used by extract_text_with_layout for each PSM mode.
     """
-    # Preprocess the image
-    processed = preprocess_image(image_path)
-
-    # --- Configuration for better Portuguese document OCR ---
-    custom_config = r'--oem 3 --psm 4 -l por+eng'
-
-    # Get detailed OCR data with bounding boxes
-    ocr_data = pytesseract.image_to_data(
-        processed,
-        config=custom_config,
-        output_type=pytesseract.Output.DICT
-    )
-
-    # Get raw text
-    raw_text = pytesseract.image_to_string(
-        processed,
-        config=custom_config
-    )
-
-    # Get hOCR format for XML-like structure with layout info
-    hocr_output = pytesseract.image_to_pdf_or_hocr(
-        processed,
-        extension='hocr',
-        config=custom_config
-    )
-
-    # Assemble structured lines from OCR data
     lines = []
     current_line = ""
     current_bbox = None
     current_conf_sum = 0
     current_conf_count = 0
 
-    # Track previous WORD's metadata (NOT using i-1 which can point to
-    # non-word-level entries like line/block/paragraph, causing silent
-    # line break detection failures).
     prev_word_line_num = -1
     prev_word_block_num = -1
     prev_word_par_num = -1
@@ -453,8 +415,6 @@ def extract_text_with_layout(image_path: str | Path) -> dict:
                     ocr_data['height'][i],
                 )
 
-                # Detect line break by comparing with PREVIOUS WORD metadata
-                # (not i-1, which may be a non-word-level entry)
                 is_new_line = (
                     prev_word_line_num != -1 and (
                         cur_line_num != prev_word_line_num or
@@ -475,28 +435,25 @@ def extract_text_with_layout(image_path: str | Path) -> dict:
                     current_conf_sum = 0
                     current_conf_count = 0
 
-                # Update previous word tracking
                 prev_word_line_num = cur_line_num
                 prev_word_block_num = cur_block_num
                 prev_word_par_num = cur_par_num
 
-                # Append word to current line
                 separator = " " if current_line else ""
                 current_line += separator + text
 
-                # Update bounding box
                 if current_bbox is None:
                     current_bbox = [x, y, w, h]
                 else:
-                    current_bbox[0] = min(current_bbox[0], x)
-                    current_bbox[1] = min(current_bbox[1], y)
-                    current_bbox[2] = max(current_bbox[0] + current_bbox[2], x + w) - current_bbox[0]
-                    current_bbox[3] = max(current_bbox[1] + current_bbox[3], y + h) - current_bbox[1]
+                    old_x, old_y = current_bbox[0], current_bbox[1]
+                    current_bbox[0] = min(old_x, x)
+                    current_bbox[1] = min(old_y, y)
+                    current_bbox[2] = max(old_x + current_bbox[2], x + w) - current_bbox[0]
+                    current_bbox[3] = max(old_y + current_bbox[3], y + h) - current_bbox[1]
 
                 current_conf_sum += conf
                 current_conf_count += 1
 
-    # Don't forget the last line
     if current_line:
         avg_conf = current_conf_sum / max(current_conf_count, 1)
         lines.append({
@@ -505,16 +462,111 @@ def extract_text_with_layout(image_path: str | Path) -> dict:
             'confidence': round(avg_conf, 1),
         })
 
-    # --- Attempt table detection ---
-    # Simple heuristic: find lines with multiple numbers (potential table rows)
-    tables = detect_tables(lines)
+    return lines
 
-    return {
-        'raw_text': raw_text.strip(),
-        'lines': lines,
-        'tables': tables,
-        'hocr': hocr_output.decode('utf-8') if isinstance(hocr_output, bytes) else hocr_output,
-    }
+
+def extract_text_with_layout(image_path: str | Path) -> dict:
+    """
+    Extract text from an image using Tesseract OCR with layout analysis.
+
+    Tries multiple PSM (Page Segmentation Mode) values and picks the best
+    result using a scoring system that balances text length against output
+    structure quality. Structured PSMs (3 — auto, 4 — single column) are
+    preferred; PSM 11 (sparse text) is only selected when it produces
+    significantly more text.
+
+    Returns both raw text and structured data with bounding boxes.
+
+    Args:
+        image_path: Path to the input image
+
+    Returns:
+        dict with keys:
+            - raw_text: Full extracted text
+            - lines: List of {text, bbox (x, y, w, h), conf}
+            - tables: Detected tabular regions with cells
+            - psm_used: The PSM mode that produced the best result
+    """
+    # Preprocess the image
+    processed = preprocess_image(image_path)
+
+    # Try multiple PSM modes and pick the best based on a combined score
+    # that prefers structured output (3, 4) over sparse (11).
+    psm_modes = [4, 3, 11]
+    best = None
+    best_score = -1.0
+
+    for psm in psm_modes:
+        custom_config = f'--oem 3 --psm {psm} -l por+eng'
+
+        raw_text = pytesseract.image_to_string(
+            processed,
+            config=custom_config
+        ).strip()
+
+        length = len(raw_text)
+
+        # Score: structured PSMs get a bonus so that PSM 11 needs ~25% more
+        # text to be preferred. This avoids broken line-level output.
+        structure_bonus = 1.25 if psm in (3, 4) else 1.0
+        score = length * structure_bonus
+
+        logger.info(
+            f"PSM {psm}: {length} chars (score={score:.0f}, "
+            f"bonus={structure_bonus:.2f})"
+        )
+
+        if score > best_score:
+            ocr_data = pytesseract.image_to_data(
+                processed,
+                config=custom_config,
+                output_type=pytesseract.Output.DICT
+            )
+
+            hocr_output = pytesseract.image_to_pdf_or_hocr(
+                processed,
+                extension='hocr',
+                config=custom_config
+            )
+
+            lines = _assemble_lines_from_ocr_data(ocr_data)
+
+            best = {
+                'raw_text': raw_text,
+                'lines': lines,
+                'tables': detect_tables(lines),
+                'hocr': hocr_output.decode('utf-8') if isinstance(hocr_output, bytes) else hocr_output,
+                'psm_used': psm,
+            }
+            best_score = score
+
+    # best is guaranteed non-None because psm_modes is non-empty
+    logger.info(f'OCR PSM selection: tried {psm_modes}, picked PSM {best["psm_used"]} '
+                f'({len(best["raw_text"])} chars, {len(best["lines"])} lines)')
+
+    return best
+
+
+def _has_product_unit(text: str) -> bool:
+    """Check if text contains a product unit/packaging abbreviation.
+
+    Catches lines like "Banana da Madeira (Kg)" or "Alface Roxa frisada (Caixa)"
+    that table-detection heuristics otherwise miss because they have no numbers.
+    """
+    unit_patterns = [
+        r'\b(?:Kg|kg|Kgs|kgs|G|g|L|l|Ml|ml)\b',
+        r'\b(?:Un|UN|un|Und|Unds|unds)\b',
+        r'\b(?:Cx|cx|Caixa|caixa|Caixas|caixas)\b',
+        r'\b(?:Pct|pct|Pacote|pacote|Pacotes|pacotes)\b',
+        r'\b(?:Saco|saco|Sacos|sacos)\b',
+        r'\b(?:M|m|Cm|cm|Mm|mm)\b',
+        r'\b(?:Pç|pç|Peça|peça|Peças|peças)\b',
+        r'\b(?:Molho|molho|Molhos|molhos)\b',
+        r'\b(?:Dose|dose|Doses|doses)\b',
+        r'\b(?:Lt|lt|Litro|litro|Litros|litros)\b',
+    ]
+    combined = '|'.join(unit_patterns)
+    return bool(re.search(combined, text))
 
 
 def detect_tables(lines: list[dict]) -> list[dict]:
@@ -527,8 +579,6 @@ def detect_tables(lines: list[dict]) -> list[dict]:
     Returns:
         List of table objects, each containing rows of cells
     """
-    import re
-
     tables = []
     potential_table_lines = []
 
@@ -539,7 +589,9 @@ def detect_tables(lines: list[dict]) -> list[dict]:
         numbers = [w for w in words if re.match(r'^[\d.,]+$', w.replace('.', '').replace(',', ''))]
         has_mixed_content = len(words) >= 3 and len(numbers) >= 2
 
-        if has_mixed_content or (len(words) >= 4 and len(numbers) >= 1):
+        has_unit = len(words) >= 2 and len(words) <= 15 and _has_product_unit(text)
+
+        if has_mixed_content or (len(words) >= 4 and len(numbers) >= 1) or has_unit:
             potential_table_lines.append(line_data)
         else:
             # If we had accumulated table lines, close the table

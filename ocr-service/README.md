@@ -401,15 +401,15 @@ Apenas extração de texto bruto, sem análise LLM. Útil para debug.
 
 **`qwen2.5:7b`** — modelo padrão configurado no `document_analyzer.py`. Adequado para a maioria dos sistemas com 8-16 GB RAM.
 
-Se o desempenho for lento ou tiver recursos limitados (≤8 GB RAM total), pode alternar para o `qwen2.5-coder:3b`:
+Se o desempenho for lento ou tiver recursos limitados (≤8 GB RAM total), pode alternar para o `qwen2.5:7b`:
 
 ```bash
 # Para usar modelo alternativo (temporário):
-set OLLAMA_MODEL=qwen2.5-coder:3b
+set OLLAMA_MODEL=qwen2.5:7b
 python ocr-service/app.py
 
 # Ou na chamada à API:
-curl -X POST http://127.0.0.1:5050/analyze -F "file=@doc.jpg" -F "model=qwen2.5-coder:3b"
+curl -X POST http://127.0.0.1:5050/analyze -F "file=@doc.jpg" -F "model=qwen2.5:7b"
 ```
 
 ### Como funciona o prompt

@@ -115,6 +115,7 @@ Route::middleware(['auth'])->group(function () {
         // OCR
         Route::get('/purchaseOrder/ocr', 'showPurchaseOrderOCR')->name('purchaseOrder.ocr');
         Route::post('/purchaseOrder/upload-document', 'uploadPurchaseOrderDocument')->name('purchaseOrder.uploadDocument');
+        Route::post('/purchaseOrder/update-ocr-data', 'updatePurchaseOrderOCRData')->name('purchaseOrder.updateOCRData');
         Route::get('/purchaseOrder/test-ocr', 'testPurchaseOrderOCR')->name('purchaseOrder.testOCR');
     });
 

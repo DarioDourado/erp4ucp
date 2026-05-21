@@ -512,7 +512,7 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
         # ── Pattern A: Simple format — CODE DESCRIPTION + trailing numbers ──
         # Strategy: extract leading code, then ALL trailing numeric tokens,
         # then use heuristics to identify quantity vs price vs total.
-        code_m = re.match(r'^(\d{3,})\s+', line_clean)
+        code_m = re.match(r'^(\d{2,})\s+', line_clean)
         if code_m:
             code = code_m.group(1)
             rest = line_clean[code_m.end():].strip()
@@ -576,7 +576,7 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
 
         # ── Pattern A-fallback: Original simple regex for 2-number lines ──
         m_simple = re.match(
-            r'^(\d{3,})\s+'
+            r'^(\d{2,})\s+'
             r'(.+?)\s+'
             r'(\d+(?:\.\d+)?)\s+'
             r'(\d+(?:\.\d+)?)\s*$',
@@ -606,7 +606,7 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
             r'(\d+(?:[.,]\d+)?)\s*'             # Quantity
             r'(?:\[?[A-Za-z]+\]?\s*)?'          # Optional unit [Cx], [KG], [UN]
             r'(\d+(?:[.,]\d+)?)\s*'             # Unit price
-            r'(?:\]?\s*\d+\s*%\s*.*)?$',        # Optional ] VAT% and total
+            r'(?:\s+.*)?$',        # Optional trailing content (VAT%, totals, etc.)
             line_stripped
         )
         if m2:

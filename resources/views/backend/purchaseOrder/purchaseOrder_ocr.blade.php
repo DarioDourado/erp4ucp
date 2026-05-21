@@ -300,37 +300,80 @@
         document.getElementById('redirect-section').style.display = 'none';
     }
 
+    let ocrResultData = null;
+
     function showResult(result) {
+        ocrResultData = result;
         const enriched = result.enriched || {};
         const supplier = enriched.supplier || {};
         const lines = enriched.lines || [];
         const parsed = result.parsed || {};
 
-        // Sumário do OCR
-        let extractedHTML = `
-            <div class="alert alert-success">
-                <strong>✓ Dados Extraídos com Sucesso!</strong>
+        // ── Vista de leitura ──
+        let readHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="alert alert-success mb-0 py-2 flex-grow-1 me-2">
+                    <strong>✓ Dados Extraídos com Sucesso!</strong>
+                </div>
+                <button type="button" id="edit-ocr-btn" class="btn btn-outline-primary btn-sm">
+                    <i class="fas fa-edit"></i> Editar
+                </button>
             </div>
-            <dl class="row small">
+            <dl class="row small" id="ocr-read-view">
                 <dt class="col-sm-5">Fornecedor:</dt>
                 <dd class="col-sm-7">
-                    <strong>${supplier.name || parsed.supplier?.nome || '-'}</strong>
+                    <strong id="read-supplier-name">${supplier.name || parsed.supplier?.nome || '-'}</strong>
                     ${supplier.code ? `<span class="badge bg-info ms-1">Cód. ${supplier.code}</span>` : ''}
                     ${supplier.found ? '' : '<span class="badge bg-warning text-dark ms-1">Criado</span>'}
                 </dd>
 
                 <dt class="col-sm-5">NIF:</dt>
-                <dd class="col-sm-7"><strong>${supplier.nif || parsed.supplier?.nif || '-'}</strong></dd>
+                <dd class="col-sm-7"><strong id="read-supplier-nif">${supplier.nif || parsed.supplier?.nif || '-'}</strong></dd>
+
+                <dt class="col-sm-5">Data:</dt>
+                <dd class="col-sm-7"><strong id="read-document-date">${parsed.documentDate || '-'}</strong></dd>
 
                 <dt class="col-sm-5">Linhas encontradas:</dt>
                 <dd class="col-sm-7"><strong>${lines.length}</strong></dd>
             </dl>
         `;
 
-        // Se houver linhas, mostrar tabela resumo
+        // ── Vista de edição (oculta inicialmente) ──
+        let editHTML = `
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="mb-0">Editar Dados Extraídos</h6>
+                <div>
+                    <button type="button" id="save-ocr-btn" class="btn btn-success btn-sm">
+                        <i class="fas fa-save"></i> Guardar
+                    </button>
+                    <button type="button" id="cancel-edit-btn" class="btn btn-outline-secondary btn-sm">
+                        <i class="fas fa-times"></i> Cancelar
+                    </button>
+                </div>
+            </div>
+            <div id="ocr-edit-view" style="display: none;">
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label small mb-0">Fornecedor</label>
+                        <input type="text" id="edit-supplier-name" class="form-control form-control-sm"
+                               value="${supplier.name || parsed.supplier?.nome || ''}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">NIF</label>
+                        <input type="text" id="edit-supplier-nif" class="form-control form-control-sm"
+                               value="${supplier.nif || parsed.supplier?.nif || ''}">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-0">Data Encomenda</label>
+                        <input type="text" id="edit-document-date" class="form-control form-control-sm"
+                               value="${parsed.documentDate || ''}">
+                    </div>
+                </div>
+        `;
+
         if (lines.length > 0) {
-            extractedHTML += `
-                <h6 class="mt-3 mb-2">Linhas Detectadas</h6>
+            editHTML += `
+                <h6 class="mb-2">Linhas</h6>
                 <div class="table-responsive">
                     <table class="table table-sm table-bordered small mb-0">
                         <thead class="table-light">
@@ -339,44 +382,52 @@
                                 <th>Descrição</th>
                                 <th class="text-end">Qtd</th>
                                 <th class="text-end">Preço Unit.</th>
-                                <th class="text-center">IVA</th>
-                                <th class="text-center">Estado</th>
                             </tr>
                         </thead>
                         <tbody>
             `;
 
             lines.forEach((line, index) => {
-                const statusBadge = line.found
-                    ? '<span class="badge bg-success">Existente</span>'
-                    : '<span class="badge bg-warning text-dark">Criado</span>';
-
-                // Format VAT rate for display
-                const taxRateValue = line.taxRate != null ? Number(line.taxRate) : 0;
-                const taxRateDisplay = taxRateValue > 0
-                    ? `<span class="fw-semibold">${line.taxRateCode || ''}</span> <span class="text-muted small">${taxRateValue.toFixed(1)}%</span>`
-                    : '<span class="text-muted">-</span>';
-
-                extractedHTML += `
+                editHTML += `
                     <tr>
-                        <td><code>${line.productCode || '-'}</code></td>
-                        <td>${line.description || '-'}</td>
-                        <td class="text-end">${Number(line.quantity).toLocaleString('pt-PT', {minimumFractionDigits: 3})}</td>
-                        <td class="text-end">${Number(line.unitPrice).toLocaleString('pt-PT', {minimumFractionDigits: 2})}€</td>
-                        <td class="text-center">${taxRateDisplay}</td>
-                        <td class="text-center">${statusBadge}</td>
+                        <td><input type="text" class="form-control form-control-sm edit-line-code"
+                                   value="${line.productCode || ''}" data-index="${index}"></td>
+                        <td><input type="text" class="form-control form-control-sm edit-line-desc"
+                                   value="${line.description || ''}" data-index="${index}"></td>
+                        <td><input type="number" step="0.001" class="form-control form-control-sm text-end edit-line-qty"
+                                   value="${Number(line.quantity).toFixed(3)}"
+                                   data-index="${index}"></td>
+                        <td><input type="number" step="0.01" class="form-control form-control-sm text-end edit-line-price"
+                                   value="${Number(line.unitPrice).toFixed(2)}" data-index="${index}"></td>
                     </tr>
                 `;
             });
 
-            extractedHTML += `
+            editHTML += `
                         </tbody>
                     </table>
                 </div>
             `;
         }
 
-        document.getElementById('extracted-data').innerHTML = extractedHTML;
+        editHTML += `</div>`;
+
+        document.getElementById('extracted-data').innerHTML = readHTML + editHTML;
+
+        // ── Event Listeners para edição ──
+        document.getElementById('edit-ocr-btn').addEventListener('click', function () {
+            document.getElementById('ocr-read-view').style.display = 'none';
+            document.getElementById('ocr-edit-view').style.display = 'block';
+            this.style.display = 'none';
+        });
+
+        document.getElementById('cancel-edit-btn').addEventListener('click', function () {
+            document.getElementById('ocr-read-view').style.display = '';
+            document.getElementById('ocr-edit-view').style.display = 'none';
+            document.getElementById('edit-ocr-btn').style.display = '';
+        });
+
+        document.getElementById('save-ocr-btn').addEventListener('click', saveEditedData);
 
         // Preencher sumário da secção de redirecionamento
         const linesCreated = lines.filter(l => !l.found).length;
@@ -388,7 +439,7 @@
                 <div class="card-body">
                     <div class="row">
                         <div class="col-md-4">
-                            <strong>${supplier.name || '-'}</strong><br>
+                            <strong id="summary-supplier-name">${supplier.name || '-'}</strong><br>
                             <small class="text-muted">${supplierStatus}</small>
                         </div>
                         <div class="col-md-4">
@@ -408,10 +459,75 @@
         `;
 
         // Atualizar o link do botão para incluir o supplierCode como query param
-        // para garantir que o fornecedor fica pré-selecionado
         const createBtn = document.getElementById('create-po-btn');
         if (supplier.code) {
             createBtn.href = '{{ route("purchaseOrder.add") }}?supplier_code=' + encodeURIComponent(supplier.code);
+        }
+    }
+
+    async function saveEditedData() {
+        const saveBtn = document.getElementById('save-ocr-btn');
+        const cancelBtn = document.getElementById('cancel-edit-btn');
+
+        // ── Disable buttons while saving ──
+        saveBtn.disabled = true;
+        cancelBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> A guardar...';
+
+        try {
+            const supplierName = document.getElementById('edit-supplier-name').value.trim();
+            const supplierNif = document.getElementById('edit-supplier-nif').value.trim();
+
+            const lineInputs = document.querySelectorAll('.edit-line-code');
+            const lines = [];
+            lineInputs.forEach((input) => {
+                const index = input.dataset.index;
+                lines.push({
+                    productCode: input.value.trim(),
+                    description: document.querySelector(`.edit-line-desc[data-index="${index}"]`).value.trim(),
+                    quantity: parseFloat(document.querySelector(`.edit-line-qty[data-index="${index}"]`).value) || 0,
+                    unitPrice: parseFloat(document.querySelector(`.edit-line-price[data-index="${index}"]`).value) || 0,
+                });
+            });
+
+            const response = await fetch('{{ route("purchaseOrder.updateOCRData", [], false) }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
+                },
+                body: JSON.stringify({
+                    supplier: { name: supplierName, nif: supplierNif },
+                    lines: lines,
+                }),
+            });
+
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`Servidor respondeu com ${response.status}: ${text.slice(0, 200)}`);
+            }
+
+            const result = await response.json();
+            if (result.success) {
+                // Atualiza a vista de leitura
+                document.getElementById('read-supplier-name').textContent = supplierName || '-';
+                document.getElementById('read-supplier-nif').textContent = supplierNif || '-';
+                document.getElementById('summary-supplier-name').textContent = supplierName || '-';
+
+                document.getElementById('ocr-read-view').style.display = '';
+                document.getElementById('ocr-edit-view').style.display = 'none';
+                document.getElementById('edit-ocr-btn').style.display = '';
+
+                alert('✓ Dados atualizados com sucesso!');
+            }
+        } catch (error) {
+            console.error('Erro ao guardar dados:', error);
+            alert('Erro ao guardar alterações: ' + error.message);
+        } finally {
+            // ── Re-enable buttons ──
+            saveBtn.disabled = false;
+            cancelBtn.disabled = false;
+            saveBtn.innerHTML = '<i class="fas fa-save"></i> Guardar';
         }
     }
 </script>

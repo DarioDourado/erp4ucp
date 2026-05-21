@@ -48,7 +48,7 @@ return [
     */
     'ocr' => [
         'base_url' => env('OCR_SERVICE_URL', 'http://127.0.0.1:5050'),
-        'ollama_model' => env('OCR_OLLAMA_MODEL', 'qwen2.5-coder:3b'),
+        'ollama_model' => env('OCR_OLLAMA_MODEL', 'qwen2.5:7b'),
         'timeout' => env('OCR_SERVICE_TIMEOUT', 120),
     ],
 
