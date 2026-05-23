@@ -2,7 +2,7 @@
 OCR Service — FastAPI Application
 ==================================
 A lightweight microservice that provides document OCR and understanding
-capabilities using Tesseract (with image preprocessing) + Ollama (local LLM).
+capabilities using EasyOCR (deep learning) + llama-cpp (local LLM).
 
 Endpoints:
 - POST /analyze: Full document analysis (preprocess → OCR → LLM parsing)
@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ocr_processor import extract_text_with_layout, extract_text_simple
-from document_analyzer import analyze_document_with_llm, DEFAULT_MODEL, OLLAMA_BASE_URL
+from document_analyzer import analyze_document_with_llm, DEFAULT_MODEL, LLM_BASE_URL
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -62,9 +62,9 @@ class AnalysisResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    tesseract_available: bool
-    ollama_available: bool
-    ollama_models: list = []
+    ocr_engine_available: bool
+    llm_available: bool
+    llm_models: list = []
     version: str = "1.0.0"
 
 
@@ -73,29 +73,30 @@ class HealthResponse(BaseModel):
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint with diagnostics."""
-    # Check Tesseract
+    # Check EasyOCR
     try:
-        import pytesseract
-        tesseract_version = pytesseract.get_tesseract_version()
-        tesseract_ok = tesseract_version is not None
+        from ocr_processor import get_reader
+        reader = get_reader()
+        ocr_ok = reader is not None
     except Exception:
-        tesseract_ok = False
+        ocr_ok = False
 
-    # Check Ollama
+    # Check LLM (llama-cpp server)
     try:
         import requests
-        r = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
-        ollama_ok = r.status_code == 200
-        models = [m["name"] for m in r.json().get("models", [])] if ollama_ok else []
+        models_url = LLM_BASE_URL.rstrip("/") + "/models"
+        r = requests.get(models_url, timeout=5)
+        llm_ok = r.status_code == 200
+        models = [m["id"] for m in r.json().get("data", [])] if llm_ok else []
     except Exception:
-        ollama_ok = False
+        llm_ok = False
         models = []
 
     return HealthResponse(
-        status="healthy" if (tesseract_ok or ollama_ok) else "degraded",
-        tesseract_available=tesseract_ok,
-        ollama_available=ollama_ok,
-        ollama_models=models,
+        status="healthy" if (ocr_ok or llm_ok) else "degraded",
+        ocr_engine_available=ocr_ok,
+        llm_available=llm_ok,
+        llm_models=models,
     )
 
 
@@ -108,14 +109,14 @@ async def analyze_document(
     """
     Full document analysis pipeline:
     1. Save uploaded file temporarily
-    2. Preprocess image (upscale, denoise, binarize, deskew)
-    3. Extract text with Tesseract (layout-aware)
-    4. (Optional) Send to Ollama LLM for structured understanding
+    2. Preprocess image (perspective, upscale, deskew)
+    3. Extract text with EasyOCR (layout-aware)
+    4. (Optional) Send to LLM for structured understanding
     5. Return structured JSON
 
     Args:
         file: Image or PDF file (JPEG, PNG, PDF)
-        model: Ollama model name to use
+        model: LLM model name to use
         use_llm: Whether to use LLM for document understanding
     """
     import time

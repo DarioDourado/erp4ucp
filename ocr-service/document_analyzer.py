@@ -1,8 +1,8 @@
 """
 Document Analyzer Module
 ========================
-Uses Ollama (local LLM) to interpret OCR-extracted text and extract
-structured data from purchase orders.
+Uses llama-cpp (local LLM server with OpenAI-compatible API) to interpret
+OCR-extracted text and extract structured data from purchase orders.
 
 The LLM understands the document structure and can identify:
 - Supplier name, NIF, address
@@ -12,17 +12,16 @@ The LLM understands the document structure and can identify:
 
 import json
 import logging
+import os
 import requests
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Default Ollama endpoint
-OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen2.5:7b"
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+DEFAULT_MODEL = os.environ.get("LLM_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 
-# System prompt for purchase order extraction
 SYSTEM_PROMPT = """You are a specialized document understanding AI for Portuguese purchase orders (encomendas a fornecedores).
 
 Your task is to analyze OCR text extracted from a purchase order document and extract structured data.
@@ -58,7 +57,6 @@ The pattern is: CODE [DESCRIPTION | QTY unit PRICE] VAT% | TOTAL
 
 Parse EVERY line with this format, even if some lines have garbled OCR text due to recognition errors."""
 
-# Few-shot examples to guide the model
 FEW_SHOT_EXAMPLES = """
 Example 1 (simple format):
 Input text:
@@ -237,24 +235,28 @@ class ParsedDocument:
 def analyze_document_with_llm(
     ocr_text: str,
     model: str = DEFAULT_MODEL,
-    ollama_url: str = OLLAMA_BASE_URL,
+    llm_url: str = LLM_BASE_URL,
     temperature: float = 0.1,
 ) -> ParsedDocument:
     """
-    Send OCR text to Ollama LLM for structured document analysis.
+    Send OCR text to llama-cpp LLM for structured document analysis.
+
+    Uses the OpenAI-compatible /v1/chat/completions endpoint.
 
     Args:
         ocr_text: The raw text extracted by OCR
-        model: Ollama model name
-        ollama_url: Ollama API base URL
+        model: llama-cpp model name
+        llm_url: llama-cpp API base URL (OpenAI-compatible)
         temperature: LLM temperature (low = more deterministic)
 
     Returns:
         ParsedDocument with structured fields
     """
-    prompt = f"""{SYSTEM_PROMPT}
+    chat_url = llm_url.rstrip("/") + "/chat/completions"
 
-{FEW_SHOT_EXAMPLES}
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"""{FEW_SHOT_EXAMPLES}
 
 Now analyze this purchase order document and extract the structured data.
 Return ONLY valid JSON, no other text.
@@ -262,32 +264,29 @@ Return ONLY valid JSON, no other text.
 OCR Text:
 ```
 {ocr_text}
-```"""
+```"""},
+    ]
 
-    logger.info(f"Sending document to Ollama model: {model}")
+    logger.info(f"Sending document to LLM (llama-cpp) model: {model} at {chat_url}")
     logger.debug(f"OCR text length: {len(ocr_text)} chars")
 
     try:
         response = requests.post(
-            f"{ollama_url}/api/generate",
+            chat_url,
             json={
                 "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": temperature,
-                    "num_predict": 4096,
-                },
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": 4096,
             },
             timeout=120,
         )
         response.raise_for_status()
         result = response.json()
 
-        llm_output = result.get("response", "").strip()
+        llm_output = result["choices"][0]["message"]["content"].strip()
         logger.debug(f"LLM raw response: {llm_output[:500]}...")
 
-        # Extract JSON from response (handle cases where LLM wraps in markdown)
         parsed = _extract_json_from_llm_output(llm_output)
 
         if parsed:
@@ -310,14 +309,14 @@ OCR Text:
             return doc
 
     except requests.exceptions.ConnectionError:
-        logger.error(f"Cannot connect to Ollama at {ollama_url}")
-        logger.info("Ollama not available, falling back to regex-based parsing")
+        logger.error(f"Cannot connect to LLM at {llm_url}")
+        logger.info("LLM not available, falling back to regex-based parsing")
         return _fallback_parse(ocr_text)
     except requests.exceptions.Timeout:
-        logger.error("Ollama request timed out")
+        logger.error("LLM request timed out")
         return _fallback_parse(ocr_text)
     except Exception as e:
-        logger.error(f"Ollama analysis failed: {e}")
+        logger.error(f"LLM analysis failed: {e}")
         return _fallback_parse(ocr_text)
 
 
@@ -325,7 +324,6 @@ def _extract_json_from_llm_output(text: str) -> dict | None:
     """Extract JSON object from LLM output, handling markdown fences."""
     import re
 
-    # Try to find JSON within markdown code blocks
     json_pattern = r'```(?:json)?\s*([\s\S]*?)```'
     matches = re.findall(json_pattern, text)
     if matches:
@@ -335,13 +333,11 @@ def _extract_json_from_llm_output(text: str) -> dict | None:
             except json.JSONDecodeError:
                 continue
 
-    # Try to parse the entire response as JSON
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try to find a JSON object anywhere in the text
     try:
         obj_pattern = r'\{[\s\S]*\}'
         match = re.search(obj_pattern, text)
@@ -357,7 +353,6 @@ def _convert_to_parsed_document(data: dict) -> ParsedDocument:
     """Convert raw dict to ParsedDocument with validation."""
     doc = ParsedDocument()
 
-    # Supplier
     supplier = data.get("supplier") or {}
     doc.supplier = {
         "name": supplier.get("name") or None,
@@ -365,11 +360,9 @@ def _convert_to_parsed_document(data: dict) -> ParsedDocument:
         "address": supplier.get("address") or None,
     }
 
-    # Document metadata
     doc.documentDate = data.get("documentDate") or None
     doc.documentNumber = data.get("documentNumber") or None
 
-    # Lines
     raw_lines = data.get("lines") or []
     for line in raw_lines:
         if isinstance(line, dict):
@@ -380,11 +373,9 @@ def _convert_to_parsed_document(data: dict) -> ParsedDocument:
                 "quantity": _to_float(line.get("quantity")),
                 "unitPrice": _to_float(line.get("unitPrice")),
             }
-            # Only include lines that have at least some meaningful data
             if cleaned_line["productDescription"] or cleaned_line["productCode"]:
                 doc.lines.append(cleaned_line)
 
-    # Totals
     doc.totalNet = _to_float(data.get("totalNet"))
     doc.totalGross = _to_float(data.get("totalGross"))
 
@@ -409,36 +400,133 @@ def _clean_description(desc: str) -> str:
     if not desc:
         return desc
 
-    # 1. Remove leading bracket
     desc = re.sub(r'^\[', '', desc).strip()
-
-    # 2. Remove trailing content after ] (bracket closing + everything after)
     desc = re.sub(r'\s*\].*$', '', desc).strip()
-
-    # 3. Remove pipe + unit/number artifacts in the middle/end
-    #    e.g. " | 12[UN|oss| 6%"  ->  remove everything from " | " if followed by digits/units
-    #    e.g. " | ex]"  ->  the ] was already handled above, now remove " | ex"
     desc = re.sub(
         r'\s*\|\s*\d*\[?[A-Za-z]*(?:\]?\s*\d*\s*%?.*)?$',
         '', desc
     ).strip()
-
-    # 4. Remove stray pipe at end
     desc = re.sub(r'\s*\|\s*$', '', desc).strip()
-
-    # 5. Remove trailing percentage patterns like " 6%" at end
     desc = re.sub(r'\s*\d+\s*%\s*$', '', desc).strip()
-
-    # 6. Remove content between remaining brackets (like [UN], [Cx], [KG])
     desc = re.sub(r'\s*\[[^\]]*\]', '', desc).strip()
-
-    # 7. Remove trailing closing parenthesis
     desc = re.sub(r'\s*\)\s*$', '', desc).strip()
-
-    # 8. Normalise multiple spaces
     desc = re.sub(r'\s{2,}', ' ', desc).strip()
 
     return desc
+
+
+def _parse_bracket_pipe_line(line: str) -> dict | None:
+    """
+    Parse a bracket/pipe table format line found in Portuguese supplier documents.
+
+    Handles formats:
+      - "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
+      - "0344 [Tomate Chucha Amad. 25KG | 25[KG| 1,85] 6% | 46,25|"
+      - "0091 [Cebola Doce Pérola | 15|kG| 1.40] 6% | 21,00]"
+      - "1102 [Couve Coração Seleção | 12|uN| 0.98] 6% | 11,40"
+      - "0551 Salsa Frisada Molho 20] UN 6%"
+
+    The structure is: CODE DESCRIPTION_WITH_UNITS | QTY[UNIT] PRICE] VAT% ...
+    """
+    import re
+
+    stripped = line.strip()
+    code_m = re.match(r'^(\d{2,4})\s+', stripped)
+    if not code_m:
+        return None
+
+    code = code_m.group(1)
+    rest = stripped[code_m.end():].strip()
+
+    # Detect if this looks like a bracket/pipe table line
+    has_pipe = '|' in rest
+    has_bracket_close = ']' in rest
+
+    if not has_pipe and not has_bracket_close:
+        return None
+
+    # ── Strategy: split by | to isolate description and data ──
+    if has_pipe:
+        # Split on first pipe, but be careful — description may contain no pipe
+        parts = rest.split('|', 1)
+        desc_raw = parts[0].strip()
+        data_raw = parts[1].strip() if len(parts) > 1 else rest
+
+        # Clean description: remove [ at start, ] at end
+        desc = re.sub(r'^\[?\s*', '', desc_raw)
+        desc = re.sub(r'\s*$', '', desc)
+    else:
+        # No pipe — look for trailing bracket structure "20] UN 6%"
+        # Split description before the bracket digits
+        bracket_split = re.split(r'\s*(\d+)\s*\]', rest, maxsplit=1)
+        if len(bracket_split) >= 3:
+            desc = bracket_split[0].strip()
+            data_raw = bracket_split[1] + ']' + bracket_split[2]
+        else:
+            return None
+
+    # ── Extract qty and price from data part ──
+    # Remove bracket content like [Cx], [KG], [UN], [KG| (unit markers)
+    data_clean = re.sub(r'\[[A-Za-z|]+\]?', ' ', data_raw)
+    # Remove closing brackets that are artifacts
+    data_clean = re.sub(r'\]', ' ', data_clean)
+    # Remove pipe separators
+    data_clean = re.sub(r'\|', ' ', data_clean)
+    # Remove trailing parenthesis and percent signs
+    data_clean = re.sub(r'[\)%]', '', data_clean)
+
+    numbers_raw = re.findall(r'(\d+(?:[.,]\d+)?)', data_clean)
+
+    if len(numbers_raw) < 2:
+        if len(numbers_raw) == 1:
+            return {
+                "productCode": code,
+                "productDescription": _clean_description(desc),
+                "quantity": _to_float(numbers_raw[0]),
+                "unitPrice": None,
+            }
+        return None
+
+    numbers = [_to_float(n) for n in numbers_raw]
+
+    # Heuristic: skip VAT rate percentages (typically 6, 13, 23)
+    # and totals (which are larger than qty * price)
+    filtered = []
+    vat_rates = {6, 6.0, 13, 13.0, 23, 23.0}
+    for n in numbers:
+        if n is None:
+            continue
+        # Skip typical VAT rate values (only if we already have at least quantity)
+        if n in vat_rates and len(filtered) >= 1:
+            continue
+        # Skip total values (approximately qty * price)
+        if len(filtered) >= 2 and filtered[0] is not None and filtered[1] is not None:
+            expected = filtered[0] * filtered[1]
+            if expected > 0 and abs(n - expected) / expected < 0.15:
+                continue
+        filtered.append(n)
+
+    if len(filtered) >= 2:
+        qty = filtered[0]
+        # If the second number looks like a VAT rate, don't use it as price
+        price_candidate = filtered[1]
+        if price_candidate in vat_rates:
+            price = None
+        else:
+            price = price_candidate
+    elif len(filtered) == 1:
+        qty = filtered[0]
+        price = None
+    else:
+        qty = numbers_raw[0] if numbers_raw else None
+        price = numbers_raw[1] if len(numbers_raw) > 1 else None
+
+    return {
+        "productCode": code,
+        "productDescription": _clean_description(desc),
+        "quantity": qty if isinstance(qty, (int, float)) else _to_float(qty),
+        "unitPrice": price if isinstance(price, (int, float)) else _to_float(price),
+    }
 
 
 def _fallback_parse(ocr_text: str) -> ParsedDocument:
@@ -451,32 +539,24 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
     doc = ParsedDocument()
     lines = ocr_text.split('\n')
 
-    # --- Supplier name ---
-    # Look for FORNECEDOR: label
     for line in lines:
         m = re.search(r'FORNECEDOR:\s*(.+)', line, re.IGNORECASE)
         if m:
-            # If there's more text after FORNECEDOR: (like on same line as date)
             name = m.group(1).strip()
-            # Clean up if the line has mixed content
             name = re.sub(r'\s+\d{2}/\d{2}/\d{4}.*$', '', name)
             name = re.sub(r'\s+NIF:.*$', '', name, flags=re.IGNORECASE)
             name = re.sub(r'\s+CONTACTO:.*$', '', name, flags=re.IGNORECASE)
             doc.supplier["name"] = name.strip()
             break
 
-    # If no FORNECEDOR: label, try to find company-like names
     if not doc.supplier["name"]:
         for line in lines:
-            # Look for lines with "Lda", "SA", "S.A.", "Unipessoal", etc.
             m = re.search(r'^([A-Za-zÀ-ÿ\s,]+(?:Lda|SA|S\.A\.|Unipessoal|LTDA|Lda\.))', line)
             if m:
                 doc.supplier["name"] = m.group(1).strip()
                 break
 
-    # --- NIF ---
     for line in lines:
-        # First try NIF: label
         m = re.search(r'NIF:\s*([\d\s]{9,})', line, re.IGNORECASE)
         if m:
             nif_raw = m.group(1).strip()
@@ -485,7 +565,6 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                 doc.supplier["nif"] = nif_clean[:9]
                 break
 
-    # --- Document date ---
     for line in lines:
         m = re.search(r'DATA\s+DA\s+ENCOMENDA:\s*(\d{2})[/-](\d{2})[/-](\d{4})', line, re.IGNORECASE)
         if m:
@@ -493,32 +572,32 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
             doc.documentDate = f"{year}-{month}-{day}"
             break
 
-    # --- Document number ---
     for line in lines:
         m = re.search(r'ENCOMENDA\s+N[ºo]\s*([\d/]+)', line, re.IGNORECASE)
         if m:
             doc.documentNumber = m.group(1).strip()
             break
 
-    # --- Product lines ---
     for line in lines:
         line_stripped = line.strip()
         if not line_stripped:
             continue
 
-        # Preprocess for number extraction
+        # ── Try bracket/pipe parser first (handles supplier table format) ──
+        bracket_result = _parse_bracket_pipe_line(line_stripped)
+        if bracket_result:
+            desc = bracket_result.get("productDescription", "")
+            if desc and not re.match(r'^(?:TOTAL|SUBTOTAL|IVA|REF|ARTIGO|COD)', desc, re.IGNORECASE):
+                doc.lines.append(bracket_result)
+                continue
+
         line_clean = line.replace('€', '').replace(',', '.').strip()
 
-        # ── Pattern A: Simple format — CODE DESCRIPTION + trailing numbers ──
-        # Strategy: extract leading code, then ALL trailing numeric tokens,
-        # then use heuristics to identify quantity vs price vs total.
         code_m = re.match(r'^(\d{2,})\s+', line_clean)
         if code_m:
             code = code_m.group(1)
             rest = line_clean[code_m.end():].strip()
 
-            # Extract only TRAILING contiguous numeric tokens
-            # (avoid capturing numbers embedded in the description)
             trailing_match = re.search(r'((?:\d+(?:\.\d+)?(?:\s+|$))+)\s*$', rest)
             if trailing_match:
                 num_tokens = re.findall(r'\d+(?:\.\d+)?', trailing_match.group(1))
@@ -526,23 +605,14 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                 num_tokens = []
 
             if len(num_tokens) >= 2:
-                # Take the trailing numeric groups
-                # Heuristic: if 3+ trailing numbers, the last is often a total
-                #   price is typically the one before the total (or the last if 2 numbers)
                 if len(num_tokens) >= 4:
-                    # Format: ... QTY_ORDERED QTY_CONFIRMED PRICE TOTAL
-                    # or:     ... QTY_ORDERED QTY_CONFIRMED PRICE
-                    # Use 3rd-from-last as quantity, 2nd-from-last as price
                     qty_idx = -3
                     price_idx = -2
                 elif len(num_tokens) >= 3:
-                    # Could be: ... QTY PRICE TOTAL or ... QTY_CONFIRMED PRICE
-                    # Check if last is much larger than second-last (total relationship)
                     try:
                         second_last = float(num_tokens[-2])
                         last = float(num_tokens[-1])
                         if second_last > 0 and last / second_last > 1.5:
-                            # last is probably a total (e.g. 20 * 1.15 = 23.00)
                             qty_idx = -3
                             price_idx = -2
                         else:
@@ -552,14 +622,12 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                         qty_idx = -3
                         price_idx = -1
                 else:
-                    # 2 trailing numbers: QTY PRICE
                     qty_idx = -2
                     price_idx = -1
 
                 qty_str = num_tokens[qty_idx]
                 price_str = num_tokens[price_idx]
 
-                # Extract description by removing trailing numeric tokens
                 desc = rest
                 for tok in reversed(num_tokens):
                     desc = re.sub(r'\s*' + re.escape(tok) + r'\s*$', '', desc, count=1)
@@ -574,7 +642,6 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                     })
                     continue
 
-        # ── Pattern A-fallback: Original simple regex for 2-number lines ──
         m_simple = re.match(
             r'^(\d{2,})\s+'
             r'(.+?)\s+'
@@ -593,20 +660,16 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                 })
                 continue
 
-        # ── Pattern B: Bracket/pipe table format ──
-        # Format: CODE [DESCRIPTION | ...QTY... PRICE] VAT% | TOTAL
-        # e.g. "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
-        # e.g. "0551 Salsa Frisada Molho 20] UN 6%"
         m2 = re.match(
-            r'^'                                # Start of line
-            r'(\d{2,4})\s*'                     # Product code (2-4 digits)
-            r'\[?'                              # Optional opening bracket
-            r'(.+?)\s*'                         # Description (non-greedy)
-            r'(?:\|\s*)?'                       # Optional pipe separator
-            r'(\d+(?:[.,]\d+)?)\s*'             # Quantity
-            r'(?:\[?[A-Za-z]+\]?\s*)?'          # Optional unit [Cx], [KG], [UN]
-            r'(\d+(?:[.,]\d+)?)\s*'             # Unit price
-            r'(?:\s+.*)?$',        # Optional trailing content (VAT%, totals, etc.)
+            r'^'
+            r'(\d{2,4})\s*'
+            r'\[?'
+            r'(.+?)\s*'
+            r'(?:\|\s*)?'
+            r'(\d+(?:[.,]\d+)?)\s*'
+            r'(?:\[?[A-Za-z]+\]?\s*)?'
+            r'(\d+(?:[.,]\d+)?)\s*'
+            r'(?:\s+.*)?$',
             line_stripped
         )
         if m2:
@@ -624,25 +687,28 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
             })
             continue
 
-        # ── Pattern C: Line with code and description only (minimal info) ──
         m3 = re.match(
-            r'^(\d{2,4})\s+'                     # Product code (2-4 digits)
-            r'(.+)',                              # Description (rest of line)
+            r'^(\d{2,4})\s+'
+            r'(.+)',
             line_stripped
         )
         if m3:
             desc = m3.group(2).strip()
             desc = _clean_description(desc)
-            # Skip if it looks like a header or footer
-            if desc and not re.match(r'^(REF|ARTIGO|COD|TOTAL|SUBTOTAL)', desc, re.IGNORECASE):
-                doc.lines.append({
-                    "productCode": m3.group(1),
-                    "productDescription": desc,
-                    "quantity": None,
-                    "unitPrice": None,
-                })
+            # Filter out headers, totals, and lines that look like non-product metadata
+            excluded_patterns = r'^(?:REF|ARTIGO|COD|TOTAL|SUBTOTAL|IVA|EUR|NIF|CONTRIBUINTE|DATA|P[AÁ]GINA|OBS)'
+            if desc and not re.match(excluded_patterns, desc, re.IGNORECASE):
+                # Only add as a line if the description contains meaningful text
+                # (not just isolated numbers or short garbage)
+                desc_clean = re.sub(r'\W+', '', desc)
+                if len(desc_clean) >= 3:
+                    doc.lines.append({
+                        "productCode": m3.group(1),
+                        "productDescription": desc,
+                        "quantity": None,
+                        "unitPrice": None,
+                    })
 
-    # --- Totals ---
     for line in lines:
         line_clean = line.replace('€', '').replace(',', '.').strip()
         m = re.search(r'TOTAL\s+SEM\s+IVA\s*([\d.]+)', line_clean, re.IGNORECASE)
@@ -669,10 +735,8 @@ def _to_float(value) -> float | None:
         return None
     try:
         if isinstance(value, str):
-            # Handle Portuguese number format: 1.234,56 -> 1234.56
             value = value.strip().replace('€', '').replace(' ', '')
             if ',' in value and '.' in value:
-                # European format: 1.234,56
                 value = value.replace('.', '').replace(',', '.')
             elif ',' in value:
                 value = value.replace(',', '.')
@@ -682,5 +746,4 @@ def _to_float(value) -> float | None:
         return None
 
 
-# Module-level import for re (used in _clean_nif)
 import re

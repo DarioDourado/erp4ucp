@@ -9,8 +9,8 @@ use Illuminate\Support\Facades\Log;
 /**
  * OCR Service — Interface with the Python OCR microservice.
  *
- * The OCR microservice uses Tesseract with image preprocessing + Ollama (local LLM)
- * for document understanding, providing much better accuracy than Tesseract alone.
+ * The OCR microservice uses EasyOCR with image preprocessing + llama-cpp (local LLM)
+ * for document understanding, providing much better accuracy than OCR alone.
  *
  * @see ocr-service/app.py
  */
@@ -22,9 +22,9 @@ class OcrService
     protected string $baseUrl;
 
     /**
-     * Ollama model to use for document understanding.
+     * LLM model to use for document understanding.
      */
-    protected string $ollamaModel;
+    protected string $llmModel;
 
     /**
      * Request timeout in seconds.
@@ -34,7 +34,7 @@ class OcrService
     public function __construct()
     {
         $this->baseUrl = config('services.ocr.base_url', 'http://127.0.0.1:5050');
-        $this->ollamaModel = config('services.ocr.ollama_model', 'qwen2.5:7b');
+        $this->llmModel = config('services.ocr.llm_model', 'qwen2.5-7b-instruct-q4_k_m');
         $this->timeout = config('services.ocr.timeout', 120);
     }
 
@@ -57,7 +57,7 @@ class OcrService
                     $file->getClientOriginalName()
                 )
                 ->post("{$this->baseUrl}/analyze", [
-                    'model' => $this->ollamaModel,
+                    'model' => $this->llmModel,
                     'use_llm' => $useLlm ? 'true' : 'false',
                 ]);
 

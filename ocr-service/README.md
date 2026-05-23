@@ -1,6 +1,6 @@
 # OCR Service — Microserviço de Reconhecimento de Documentos
 
-Este microserviço Python combina **Tesseract OCR com pré-processamento de imagem** e **Ollama LLM local** para extrair dados estruturados de documentos de compra (encomendas) em português, sem depender de APIs externas pagas.
+Este microserviço Python combina **EasyOCR (deep learning) com pré-processamento de imagem** e **llama-cpp LLM local (OpenAI-compatible API)** para extrair dados estruturados de documentos de compra (encomendas) em português, sem depender de APIs externas pagas.
 
 ---
 
@@ -8,32 +8,23 @@ Este microserviço Python combina **Tesseract OCR com pré-processamento de imag
 
 Sempre que ligar o computador, siga estes passos **por ordem**:
 
-### 1. Iniciar o Ollama (servidor de IA local)
+### 1. Iniciar o llama-cpp server (servidor de IA local)
 
-O Ollama normalmente inicia automaticamente como serviço do Windows. Verifique:
-
-```bash
-ollama list
-```
-
-Se não estiver a correr, inicie manualmente a partir do Menu Iniciar → "Ollama" ou execute:
+Inicie o servidor llama-cpp com o seu modelo GGUF:
 
 ```bash
-# Se o Ollama não iniciar automaticamente:
-"C:\Users\davdu\AppData\Local\Programs\Ollama\ollama.exe" serve
+python -m llama_cpp.server --model "c:\caminho\para\qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" --host 127.0.0.1 --port 8080
 ```
 
-### 2. Verificar se o modelo `qwen2.5:7b` está disponível
+> Nota: llama-cpp detecta automaticamente as partes de um GGUF dividido e carrega todas.
+
+### 2. Verificar se o servidor está acessível
 
 ```bash
-ollama list
+curl http://127.0.0.1:8080/v1/models
 ```
 
-Deverá ver `qwen2.5:7b` na lista. Se não estiver:
-
-```bash
-ollama pull qwen2.5:7b
-```
+Deverá ver o modelo disponível na resposta JSON.
 
 ### 3. Iniciar o serviço OCR
 
@@ -55,9 +46,9 @@ Resposta esperada:
 ```json
 {
   "status": "healthy",
-  "tesseract_available": true,
-  "ollama_available": true,
-  "ollama_models": ["qwen2.5:7b", "qwen2.5-coder:3b"]
+  "ocr_engine_available": true,
+  "llm_available": true,
+  "llm_models": ["qwen2.5-7b-instruct-q4_k_m"]
 }
 ```
 
@@ -86,8 +77,8 @@ Resposta esperada:
 | Componente | Versão Mínima | Notas |
 |-----------|--------------|-------|
 | **Python** | 3.10+ | Testado com 3.14.4 |
-| **Tesseract OCR** | 5.0+ | Engine OCR principal |
-| **Ollama** | 0.24.0+ | Servidor de LLM local |
+| **EasyOCR** | 1.7+ | Engine OCR (deep learning) |
+| **llama-cpp** | — | Servidor de LLM local (OpenAI-compatible API) |
 | **Pip** | — | Gestor de pacotes Python |
 | **Laravel** | 11.x | Aplicação que consome o serviço |
 
@@ -96,45 +87,45 @@ Resposta esperada:
 - `fastapi` + `uvicorn` — Servidor HTTP assíncrono
 - `opencv-python-headless` — Pré-processamento de imagem
 - `pillow` — Manipulação de imagem
-- `pytesseract` — Binding Python para Tesseract
-- `requests` — Chamadas HTTP ao Ollama
+- `easyocr` — Engine OCR baseada em deep learning (PyTorch)
+- `requests` — Chamadas HTTP ao llama-cpp (OpenAI-compatible API)
 - `numpy` — Suporte a arrays numéricos
 
 ---
 
 ## Instalação
 
-### 1. Tesseract OCR
-
-Descarregar e instalar a partir de:  
-[https://github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki)
-
-**Importante:** Instalar com suporte para **português** (`por`). Durante a instalação, selecionar a opção "Portuguese language data".
-
-Após instalar, confirmar o caminho do executável (geralmente `C:\Program Files\Tesseract-OCR\tesseract.exe`).
-
-### 2. Dependências Python
+### 1. Dependências Python
 
 ```bash
 cd c:\git\Pessoal\erp4ucp
 pip install -r ocr-service/requirements.txt
 ```
 
-### 3. Ollama
+> ⚠️ `easyocr` depende de `torch` (PyTorch). A instalação pode ser grande (~2 GB com CUDA, ~800 MB CPU-only). Se tiver GPU NVIDIA, instale o PyTorch com CUDA primeiro para melhor performance:
+> ```bash
+> pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+> pip install -r ocr-service/requirements.txt
+> ```
 
-Descarregar e instalar a partir de:  
-[https://ollama.com/download](https://ollama.com/download)
+### 2. llama-cpp (servidor LLM)
 
-Após instalar, fazer o pull do modelo recomendado:
+Instale o llama-cpp-python com suporte a servidor:
 
 ```bash
-ollama pull qwen2.5:7b
+pip install llama-cpp-python[server]
 ```
 
-Pode verificar se o(s) modelo(s) estão disponíveis:
+Descarregue o modelo GGUF recomendado e inicie o servidor:
 
 ```bash
-ollama list
+python -m llama_cpp.server --model "caminho/para/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf" --host 127.0.0.1 --port 8080
+```
+
+Pode verificar se o servidor está acessível:
+
+```bash
+curl http://127.0.0.1:8080/v1/models
 ```
 
 ---
@@ -150,7 +141,7 @@ ollama list
 │       ▼                                                     │
 │  OcrService.php ──────HTTP POST (multipart)──────┐          │
 └───────────────────────────────────────────────────┤          │
-                                                    ▼          │
+                                                     ▼          │
 ┌──────────────────────────────────────────────────────────────┐
 │              FastAPI Microservice (Python)                    │
 │                                                              │
@@ -158,20 +149,18 @@ ollama list
 │       │                                                      │
 │       ├─► 1. Guarda imagem temporariamente                   │
 │       ├─► 2. ocr_processor.py                                │
-│       │       ├─ Upscale (min 2000px)                        │
-│       │       ├─ Grayscale + Denoise                         │
-│       │       ├─ Adaptive threshold (binarization)           │
+│       │       ├─ Perspective correction                      │
+│       │       ├─ Upscale (min 800px shortest side)           │
 │       │       ├─ Deskew (correção de rotação)                │
-│       │       ├─ Morphological close (ligar texto)           │
-│       │       └─ Tesseract OCR (PSM 4 — layout-aware)        │
+│       │       └─ EasyOCR (deep learning, pt+en)              │
 │       ├─► 3. document_analyzer.py                            │
-│       │       ├─ LLM (Ollama) → análise semântica            │
-│       │       ├─ Fallback regex → extração manual            │
-│       │       └─ JSON estruturado                            │
-│       └─► 4. Resposta JSON                                   │
-│                                                              │
-│              Ollama (qwen2.5:7b)                               │
-│                  Servidor local: 127.0.0.1:11434             │
+│       │       ├─ LLM (llama-cpp) → análise semântica          │
+│       │       ├─ Fallback regex → extração manual             │
+│       │       └─ JSON estruturado                             │
+│       └─► 4. Resposta JSON                                    │
+│                                                               │
+│              llama-cpp server (OpenAI-compatible)              │
+│                  Servidor local: 127.0.0.1:8080               │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -179,9 +168,9 @@ ollama list
 
 1. O utilizador faz upload de uma imagem/PDF no Laravel
 2. `PurchaseOrderController` envia a imagem para o microserviço via `OcrService`
-3. O microserviço pré-processa a imagem (upscale, binarização, deskew)
-4. Executa Tesseract OCR com deteção de layout (PSM 4)
-5. Envia o texto extraído para o Ollama com **few-shot prompting**
+3. O microserviço pré-processa a imagem (perspective correction, upscale, deskew)
+4. Executa EasyOCR com deteção de layout (deep learning)
+5. Envia o texto extraído para o LLM com **few-shot prompting**
 6. O LLM analisa o texto e devolve JSON estruturado
 7. Se o LLM falhar, cai no **fallback regex**
 8. O Laravel converte o formato LLM para o formato interno e persiste os dados
@@ -198,8 +187,8 @@ O serviço lê as seguintes variáveis de ambiente (com defaults):
 |---------|---------|-----------|
 | `OCR_SERVICE_HOST` | `127.0.0.1` | IP de bind do servidor FastAPI |
 | `OCR_SERVICE_PORT` | `5050` | Porta do servidor FastAPI |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | URL base do servidor Ollama |
-| `OLLAMA_MODEL` | `qwen2.5:7b` | Modelo LLM a usar para análise |
+| `LLM_BASE_URL` | `http://127.0.0.1:8080/v1` | URL base do servidor llama-cpp (OpenAI-compatible) |
+| `LLM_MODEL` | `qwen2.5-7b-instruct-q4_k_m` | Modelo LLM a usar para análise |
 
 Estas variáveis podem ser definidas no sistema ou passadas no `start_service.bat`.
 
@@ -211,20 +200,20 @@ Adicionar ao ficheiro `.env` do projeto Laravel:
 # URL base do microserviço OCR
 OCR_SERVICE_URL=http://127.0.0.1:5050
 
-# Modelo Ollama para análise de documentos (deve estar instalado no Ollama)
-OCR_OLLAMA_MODEL=qwen2.5:7b
+# Modelo LLM para análise de documentos (deve estar carregado no llama-cpp)
+OCR_LLM_MODEL=qwen2.5-7b-instruct-q4_k_m
 
 # Timeout (segundos) para chamadas ao microserviço
 OCR_SERVICE_TIMEOUT=120
 ```
 
-**Nota:** O timeout deve ser generoso (120s+) porque a chamada ao Ollama pode demorar 30-50 segundos.
+**Nota:** O timeout deve ser generoso (120s+) porque a chamada ao LLM pode demorar 30-50 segundos.
 
 ---
 
 ## Como iniciar o serviço
 
-> ⚠️ **IMPORTANTE:** Antes de iniciar este serviço, certifique-se de que o **Ollama está a correr** (geralmente inicia automaticamente com o Windows).
+> ⚠️ **IMPORTANTE:** Antes de iniciar este serviço, certifique-se de que o **llama-cpp server está a correr** (na porta 8080).
 > Consulte a secção [Quick Start — Após Reiniciar o Computador](#quick-start--após-reiniciar-o-computador) no topo deste documento.
 
 ### Método 1: Script de início rápido (Windows) — ✅ RECOMENDADO
@@ -234,10 +223,9 @@ ocr-service\start_service.bat
 ```
 
 Este script:
-1. Define o caminho do Tesseract
-2. Verifica se o Ollama está disponível (`ollama.exe`)
-3. Faz auto-pull do modelo `qwen2.5:7b` se não existir
-4. Inicia o servidor FastAPI na porta `5050`
+1. Verifica se Python está disponível
+2. Verifica se o llama-cpp server está acessível (http://127.0.0.1:8080)
+3. Inicia o servidor FastAPI na porta `5050`
 
 ### Método 2: Manual
 
@@ -247,7 +235,7 @@ cd c:\git\Pessoal\erp4ucp && python ocr-service/app.py
 
 # Ou com variáveis customizadas
 set OCR_SERVICE_PORT=5050
-set OLLAMA_MODEL=qwen2.5:7b
+set LLM_MODEL=qwen2.5-7b-instruct-q4_k_m
 python ocr-service/app.py
 ```
 
@@ -268,9 +256,9 @@ Resposta esperada:
 ```json
 {
   "status": "healthy",
-  "tesseract_available": true,
-  "ollama_available": true,
-  "ollama_models": ["qwen2.5:7b", "qwen2.5-coder:3b"]
+  "ocr_engine_available": true,
+  "llm_available": true,
+  "llm_models": ["qwen2.5-7b-instruct-q4_k_m"]
 }
 ```
 
@@ -280,15 +268,15 @@ Resposta esperada:
 
 ### `GET /health`
 
-Verifica o estado do serviço, disponibilidade do Tesseract e Ollama.
+Verifica o estado do serviço, disponibilidade do EasyOCR e LLM.
 
 **Resposta (200):**
 ```json
 {
   "status": "healthy",
-  "tesseract_available": true,
-  "ollama_available": true,
-  "ollama_models": ["qwen2.5:7b", "qwen2.5-coder:3b"]
+  "ocr_engine_available": true,
+  "llm_available": true,
+  "llm_models": ["qwen2.5-7b-instruct-q4_k_m"]
 }
 ```
 
@@ -303,14 +291,14 @@ Endpoint principal. Aceita um documento (imagem ou PDF) e devolve dados estrutur
 | Parâmetro | Tipo | Obrigatório | Descrição |
 |-----------|------|-------------|-----------|
 | `file` | UploadFile | Sim | Documento a analisar (PNG, JPG, PDF) |
-| `model` | str | Não | Modelo Ollama a usar (default: `qwen2.5:7b`) |
+| `model` | str | Não | Modelo LLM a usar (default: definido em `LLM_MODEL`) |
 | `use_llm` | bool | Não | Se `false`, salta a análise LLM e usa apenas OCR + fallback regex (default: `true`) |
 
 **Exemplo com `curl`:**
 ```bash
 curl -X POST http://127.0.0.1:5050/analyze `
   -F "file=@encomenda_1.png" `
-  -F "model=qwen2.5:7b" `
+  -F "model=qwen2.5-7b-instruct-q4_k_m" `
   -F "use_llm=true"
 ```
 
@@ -392,24 +380,23 @@ Apenas extração de texto bruto, sem análise LLM. Útil para debug.
 
 | Modelo | Vantagens | Desvantagens |
 |--------|-----------|--------------|
-| `qwen2.5:7b` | ✅ **Recomendado** — melhor equilíbrio qualidade/recursos | ~4-6 GB RAM |
-| `qwen2.5-coder:3b` | ✅ Mais rápido, ~2-3 GB RAM | Menos preciso em OCR ruidoso; caracteres acentuados podem falhar |
-| `aya:8b` | ✅ Excelente multilíngue, forte em PT | ~5-8 GB RAM, ligeiramente menos consistente em JSON |
-| `llama3.1:8b` | ✅ Segue instruções de formato rigorosamente | ~4-6 GB RAM, PT ligeiramente inferior |
+| `qwen2.5-7b-instruct-q4_k_m` | ✅ **Recomendado** — melhor equilíbrio qualidade/recursos | ~4-6 GB RAM |
+| `qwen2.5-coder-3b-q4_k_m` | ✅ Mais rápido, ~2-3 GB RAM | Menos preciso em OCR ruidoso; caracteres acentuados podem falhar |
+| `llama-3.1-8b-q4_k_m` | ✅ Segue instruções de formato rigorosamente | ~4-6 GB RAM, PT ligeiramente inferior |
 
 ### Recomendação
 
-**`qwen2.5:7b`** — modelo padrão configurado no `document_analyzer.py`. Adequado para a maioria dos sistemas com 8-16 GB RAM.
+**`qwen2.5-7b-instruct-q4_k_m`** — modelo padrão configurado no `document_analyzer.py`. Adequado para a maioria dos sistemas com 8-16 GB RAM.
 
-Se o desempenho for lento ou tiver recursos limitados (≤8 GB RAM total), pode alternar para o `qwen2.5:7b`:
+Se o desempenho for lento ou tiver recursos limitados (≤8 GB RAM total), pode usar um modelo mais pequeno:
 
 ```bash
 # Para usar modelo alternativo (temporário):
-set OLLAMA_MODEL=qwen2.5:7b
+set LLM_MODEL=qwen2.5-coder-1.5b-q4_k_m
 python ocr-service/app.py
 
 # Ou na chamada à API:
-curl -X POST http://127.0.0.1:5050/analyze -F "file=@doc.jpg" -F "model=qwen2.5:7b"
+curl -X POST http://127.0.0.1:5050/analyze -F "file=@doc.jpg" -F "model=qwen2.5-coder-1.5b-q4_k_m"
 ```
 
 ### Como funciona o prompt
@@ -433,37 +420,35 @@ Se o LLM falhar (não devolver JSON válido), o sistema cai automaticamente no *
 
 ## Troubleshooting
 
-### "TesseractNotFoundError: tesseract is not installed"
+### "EasyOCR is not available"
 
-O caminho do Tesseract não está no PATH ou não foi configurado.
+O EasyOCR reader pode não ter carregado corretamente. Verifique se o PyTorch está instalado:
 
-**Solução:** Editar `ocr-service/start_service.bat` e definir:
-
-```batch
-set TESSERACT_PATH=C:\Program Files\Tesseract-OCR\tesseract.exe
+```bash
+python -c "import torch; print(torch.__version__)"
 ```
 
-Ou, em Python diretamente no ficheiro `ocr_processor.py`:
-
-```python
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+Se não estiver instalado:
+```bash
+pip install torch torchvision
 ```
 
-### "Ollama is not available"
+Se tiver GPU NVIDIA, instale a versão CUDA:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+```
 
-O servidor Ollama não está a correr.
+### "LLM is not available"
+
+O servidor llama-cpp não está a correr.
 
 **Solução:**
 ```bash
-# Verificar se Ollama está instalado
-ollama --version
+# Verificar se o llama-cpp server está a correr
+curl http://127.0.0.1:8080/v1/models
 
-# Iniciar o servidor (Windows: inicia automaticamente como serviço)
-# Verificar processos
-tasklist | findstr ollama
-
-# Fazer pull do modelo se necessário
-ollama pull qwen2.5:7b
+# Iniciar o servidor
+python -m llama_cpp.server --model "caminho/para/modelo.gguf" --host 127.0.0.1 --port 8080
 ```
 
 ### "Connection refused" no Laravel
@@ -484,7 +469,7 @@ O modelo pode ocasionalmente alucinar valores (especialmente NIFs).
 **Solução:** O fallback regex (`_fallback_parse()` em `document_analyzer.py`) entra em ação quando o JSON do LLM é inválido. Se o problema persistir, experimentar:
 
 1. Aumentar o `temperature` no prompt (menos criatividade)
-2. Usar um modelo maior (ex: `qwen2.5:7b`)
+2. Usar um modelo maior (ex: GGUF com quantização Q5 ou Q8)
 3. Adicionar mais few-shot examples no `SYSTEM_PROMPT`
 
 ### A extração está muito lenta
@@ -493,15 +478,17 @@ Tempos esperados:
 
 | Operação | Tempo típico |
 |----------|-------------|
-| Pré-processamento + OCR | 1-3 segundos |
-| Análise LLM (qwen2.5:7b) | 25-50 segundos |
-| Total | 25-45 segundos |
+| Pré-processamento + OCR (EasyOCR, CPU) | 3-10 segundos |
+| Pré-processamento + OCR (EasyOCR, GPU) | 1-3 segundos |
+| Análise LLM (llama-cpp) | 25-50 segundos |
+| Total (CPU) | 30-55 segundos |
 
 Se for demasiado lento:
 
 1. **Desativar o LLM** (`use_llm=false`) — usa apenas regex fallback (mais rápido, menos preciso)
-2. **Reduzir o upscale** — em `ocr_processor.py`, alterar `min_dim = 1500` em vez de `2000`
-3. **Usar um modelo mais pequeno** — `qwen2.5-coder:1.5b` (mais rápido, menos preciso)
+2. **Reduzir o upscale** — em `ocr_processor.py`, alterar `min_dim = 600` em vez de `800`
+3. **Usar GPU** — EasyOCR com CUDA é 3-5x mais rápido que CPU
+4. **Usar um modelo mais pequeno** — GGUF quantizados Q2/Q3 (mais rápido, menos preciso)
 
 ### Erro "No file uploaded" (422)
 
@@ -524,8 +511,8 @@ O parâmetro `file` não foi enviado ou está vazio.
 ```
 ocr-service/
 ├── app.py                 # Servidor FastAPI (endpoints /health, /analyze, /ocr-only)
-├── ocr_processor.py       # Pré-processamento de imagem + Tesseract OCR
-├── document_analyzer.py   # Integração Ollama LLM + fallback regex
+├── ocr_processor.py       # Pré-processamento de imagem + EasyOCR
+├── document_analyzer.py   # Integração llama-cpp LLM + fallback regex
 ├── requirements.txt       # Dependências Python
 ├── start_service.bat      # Script de início rápido (Windows)
 └── README.md              # Este documento
@@ -556,7 +543,7 @@ with open("encomenda_1.png", "rb") as f:
     resp = requests.post(
         "http://127.0.0.1:5050/analyze",
         files={"file": f},
-        data={"model": "qwen2.5:7b", "use_llm": "true"}
+        data={"model": "qwen2.5-7b-instruct-q4_k_m", "use_llm": "true"}
     )
 print(resp.json())
 ```
@@ -587,7 +574,7 @@ dump($result);
 - O serviço corre apenas em `127.0.0.1` (localhost) — não exposto à rede
 - Não requer autenticação porque só aceita tráfego local
 - Os ficheiros temporários são limpos após processamento
-- O Ollama corre localmente — nenhum dado sai da máquina
+- O llama-cpp corre localmente — nenhum dado sai da máquina
 
 ---
 

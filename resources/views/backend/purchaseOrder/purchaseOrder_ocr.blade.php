@@ -319,24 +319,74 @@
                     <i class="fas fa-edit"></i> Editar
                 </button>
             </div>
-            <dl class="row small" id="ocr-read-view">
-                <dt class="col-sm-5">Fornecedor:</dt>
-                <dd class="col-sm-7">
-                    <strong id="read-supplier-name">${supplier.name || parsed.supplier?.nome || '-'}</strong>
-                    ${supplier.code ? `<span class="badge bg-info ms-1">Cód. ${supplier.code}</span>` : ''}
-                    ${supplier.found ? '' : '<span class="badge bg-warning text-dark ms-1">Criado</span>'}
-                </dd>
+            <div id="ocr-read-view">
+                <dl class="row small mb-3">
+                    <dt class="col-sm-4">Fornecedor:</dt>
+                    <dd class="col-sm-8">
+                        <strong id="read-supplier-name">${supplier.name || parsed.supplier?.nome || '-'}</strong>
+                        ${supplier.code ? `<span class="badge bg-info ms-1">Cód. ${supplier.code}</span>` : ''}
+                        ${supplier.found ? '' : '<span class="badge bg-warning text-dark ms-1">Criado</span>'}
+                    </dd>
 
-                <dt class="col-sm-5">NIF:</dt>
-                <dd class="col-sm-7"><strong id="read-supplier-nif">${supplier.nif || parsed.supplier?.nif || '-'}</strong></dd>
+                    <dt class="col-sm-4">NIF:</dt>
+                    <dd class="col-sm-8"><strong id="read-supplier-nif">${supplier.nif || parsed.supplier?.nif || '-'}</strong></dd>
 
-                <dt class="col-sm-5">Data:</dt>
-                <dd class="col-sm-7"><strong id="read-document-date">${parsed.documentDate || '-'}</strong></dd>
-
-                <dt class="col-sm-5">Linhas encontradas:</dt>
-                <dd class="col-sm-7"><strong>${lines.length}</strong></dd>
-            </dl>
+                    <dt class="col-sm-4">Data:</dt>
+                    <dd class="col-sm-8"><strong id="read-document-date">${parsed.documentDate || '-'}</strong></dd>
+                </dl>
         `;
+
+        if (lines.length > 0) {
+            readHTML += `
+                <h6 class="mb-2">Linhas Extraídas (${lines.length})</h6>
+                <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                    <table class="table table-sm table-bordered small mb-0">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th style="width: 15%;">Cód. Artigo</th>
+                                <th style="width: 35%;">Descrição</th>
+                                <th class="text-end" style="width: 15%;">Qtd</th>
+                                <th class="text-end" style="width: 15%;">Preço Unit.</th>
+                                <th class="text-end" style="width: 20%;">Valor Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+            `;
+
+            lines.forEach((line, index) => {
+                const qty = parseFloat(line.quantity) || 0;
+                const price = parseFloat(line.unitPrice) || 0;
+                const total = (qty * price).toFixed(2);
+                const code = line.productCode || '-';
+                const desc = line.description || line.productDescription || '-';
+                const badgeClass = line.found ? 'bg-success' : 'bg-warning text-dark';
+                const badgeText = line.found ? '' : 'Novo';
+
+                readHTML += `
+                    <tr>
+                        <td><code>${code}</code>${!line.found ? ` <span class="badge ${badgeClass} ms-1" style="font-size:0.6rem;">${badgeText}</span>` : ''}</td>
+                        <td>${desc}</td>
+                        <td class="text-end">${qty.toLocaleString('pt-PT', { minimumFractionDigits: 0, maximumFractionDigits: 3 })}</td>
+                        <td class="text-end">${price > 0 ? price.toFixed(2) + ' €' : '-'}</td>
+                        <td class="text-end">${total > 0 ? total + ' €' : '-'}</td>
+                    </tr>
+                `;
+            });
+
+            readHTML += `
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        } else {
+            readHTML += `
+                <div class="alert alert-warning py-2 mb-0">
+                    <small>Nenhuma linha de artigo encontrada no documento.</small>
+                </div>
+            `;
+        }
+
+        readHTML += `</div>`;
 
         // ── Vista de edição (oculta inicialmente) ──
         let editHTML = `

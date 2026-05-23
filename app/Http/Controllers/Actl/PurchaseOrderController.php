@@ -708,7 +708,7 @@ class PurchaseOrderController extends Controller
      * Processa o upload de um documento (imagem ou PDF) e retorna dados
      * estruturados (fornecedor + linhas) prontos para criar uma encomenda.
      *
-     * Primeiro tenta o OCR Service (Tesseract + preprocessing + Ollama LLM).
+     * Primeiro tenta o OCR Service (EasyOCR + preprocessing + LLM).
      * Se o serviço não estiver disponível, cai para o Tesseract direto.
      */
     public function uploadPurchaseOrderDocument(Request $request)
@@ -1009,6 +1009,12 @@ class PurchaseOrderController extends Controller
             return ['found' => false, 'model' => null];
         }
 
+        // Só cria artigo se tiver uma descrição minimamente útil
+        $descTrimmed = trim($descricao);
+        if (empty($descTrimmed) || mb_strlen($descTrimmed) < 2) {
+            return ['found' => false, 'model' => null];
+        }
+
         $family = $this->ensureDefaultFamily();
         $unit = $this->ensureDefaultUnit();
         $taxRateCode = $this->resolveTaxRateFromOcr(null);
@@ -1016,7 +1022,7 @@ class PurchaseOrderController extends Controller
 
         $product = Product::create([
             'code' => $newCode,
-            'description' => $descricao ?: 'Artigo (OCR)',
+            'description' => $descTrimmed,
             'family' => $family,
             'unit' => $unit,
             'taxRateCode' => $taxRateCode,
@@ -1223,12 +1229,110 @@ class PurchaseOrderController extends Controller
      *   - Código + Descrição + Quantidade + Preço
      *   - Descrição + Quantidade + Preço
      *   - Linhas com formato de colchetes/pipes (formatos de tabela de fornecedor)
+    /**
+     * Tenta extrair uma linha de artigo no formato colchetes/pipes de tabela de fornecedor.
      *
-     * NOTA: O OCR frequëntemente extrai texto com espaços simples entre colunas
-     * (não 2+), por isso esta implementação tolera \s+ em vez de \s{2,}.
-     * A lógica usa o facto de que as últimas palavras numérica da linha são
-     * tipicamente a quantidade e o preço unitário.
+     * Formatos suportados:
+     *   "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
+     *   "0344 [Tomate Chucha Amad. 25KG | 25[KG| 1,85] 6% | 46,25|"
+     *   "0551 Salsa Frisada Molho 20] UN 6%"
+     *
+     * @return array|null Linha estruturada ou null se não reconhecer o formato
      */
+    private function tryParseBracketPipeLine(string $line): ?array
+    {
+        $stripped = trim($line);
+
+        if (!preg_match('/^(\d{2,4})\s+/u', $stripped, $codeMatch)) {
+            return null;
+        }
+        $code = $codeMatch[1];
+        $rest = trim(substr($stripped, strlen($codeMatch[0])));
+
+        $hasPipe = strpos($rest, '|') !== false;
+        $hasBracketClose = strpos($rest, ']') !== false;
+
+        if (!$hasPipe && !$hasBracketClose) {
+            return null;
+        }
+
+        if ($hasPipe) {
+            $pipePos = strpos($rest, '|');
+            $descRaw = trim(substr($rest, 0, $pipePos));
+            $dataRaw = trim(substr($rest, $pipePos + 1));
+        } else {
+            // Sem pipe: procura padrão "DESCRIÇÃO 20] UN 6%"
+            if (preg_match('/^(.+?)\s+(\d+)\s*\]/u', $rest, $bracketMatch)) {
+                $descRaw = $bracketMatch[1];
+                $dataRaw = substr($rest, strlen($bracketMatch[0]));
+            } else {
+                return null;
+            }
+        }
+
+        // Limpa a descrição
+        $desc = ltrim($descRaw, '[');
+        $desc = rtrim($desc);
+        $desc = $this->sanitizeDescription($desc);
+        if (empty($desc)) {
+            return null;
+        }
+
+        // Extrai números da parte de dados (quantidade + preço)
+        // Remove ruído: unidades [Cx], [KG], [UN], parênteses, pipes, brackets
+        $dataClean = preg_replace('/\[[A-Za-z|]+\]?/u', ' ', $dataRaw);
+        $dataClean = str_replace([']', '|', ')'], ' ', $dataClean);
+        preg_match_all('/\d+(?:[.,]\d+)?/u', $dataClean, $numberMatches);
+        $numbersRaw = $numberMatches[0] ?? [];
+
+        if (count($numbersRaw) < 2) {
+            if (count($numbersRaw) === 1) {
+                return [
+                    'codigo' => $code,
+                    'descricao' => $desc,
+                    'quantidade' => $this->normalizeNumber($numbersRaw[0]),
+                    'precoUnitario' => 0,
+                ];
+            }
+            return null;
+        }
+
+        // Converte números e filtra taxas de IVA e totais
+        $numbers = array_map(fn($n) => $this->normalizeNumber($n), $numbersRaw);
+        $vatRates = [6.0, 13.0, 23.0];
+
+        $filtered = [];
+        foreach ($numbers as $n) {
+            // Pula taxas de IVA conhecidas (apenas se já tivermos pelo menos a quantidade)
+            if (in_array($n, $vatRates, true) && count($filtered) >= 1) {
+                continue;
+            }
+            // Pula totais (número aproximadamente igual a qtd * preço)
+            if (count($filtered) >= 2 && ($filtered[0] ?? 0) > 0 && ($filtered[1] ?? 0) > 0) {
+                $expectedTotal = $filtered[0] * $filtered[1];
+                if ($expectedTotal > 0 && abs($n - $expectedTotal) / $expectedTotal < 0.15) {
+                    continue;
+                }
+            }
+            $filtered[] = $n;
+        }
+
+        $qty = $filtered[0] ?? $this->normalizeNumber($numbersRaw[0]);
+        $priceCandidate = $filtered[1] ?? null;
+        // Se o segundo número for uma taxa de IVA, não o usamos como preço
+        if ($priceCandidate !== null && in_array($priceCandidate, $vatRates, true)) {
+            $priceCandidate = null;
+        }
+        $price = $priceCandidate ?? (count($numbersRaw) > 1 ? $this->normalizeNumber($numbersRaw[1]) : 0);
+
+        return [
+            'codigo' => $code,
+            'descricao' => $desc,
+            'quantidade' => $qty,
+            'precoUnitario' => $price,
+        ];
+    }
+
     private function extractPOTabularLines(string $text): array
     {
         $lines = explode("\n", $text);
@@ -1241,32 +1345,12 @@ class PurchaseOrderController extends Controller
                 continue;
             }
 
-            // ── Passo 1: Padrão de colchetes/pipes (formato tabela fornecedor) ──
-            // Ex: "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6%"
-            // Ex: "0551 Salsa Frisada Molho 20] UN 6%"
-            // NOTA: O regex usa descrição non-greedy (.+?) para isolar código + qtd/preço.
-            if (preg_match('/^' .
-                '(\d{2,4}|[A-Z]+-\d+)\s*' .     // Código
-                '\[?' .                           // [ opcional
-                '(.+?)' .                         // Descrição (non-greedy para priorizar o código + qtd/preço)
-                '(?:[\s\[\|]+)?' .                // Separadores entre descrição e números
-                '(\d+(?:[.,]\d+)?)\s*' .          // Quantidade
-                '(?:\[?[A-Za-z]+\]?\s*)?' .       // Unidade opcional [Cx], [KG], [UN]
-                '(\d+(?:[.,]\d+)?)\s*' .          // Preço unitário
-                '(?:\s+.*)?$/u',     // Conteúdo final opcional (IVA%, totais, etc.)
-                $line, $m
-            )) {
-                $descricao = $this->sanitizeDescription($m[2]);
-                if (!empty($descricao)) {
-                    $results[] = [
-                        'codigo' => $m[1],
-                        'descricao' => $descricao,
-                        'quantidade' => $this->normalizeNumber($m[3]),
-                        'precoUnitario' => $this->normalizeNumber($m[4]),
-                    ];
-                    $currentDescription = '';
-                    continue;
-                }
+            // ── Passo 0: Tenta o parser dedicado de colchetes/pipes ──
+            $bracketResult = $this->tryParseBracketPipeLine($line);
+            if ($bracketResult !== null && !empty($bracketResult['descricao'])) {
+                $results[] = $bracketResult;
+                $currentDescription = '';
+                continue;
             }
 
             // ── Passo 2: Padrão com números no fim da linha ──
@@ -1388,12 +1472,20 @@ class PurchaseOrderController extends Controller
             $productResult = $this->findOrCreateProductFromOcr($line);
             $productModel = $productResult['model'] ?? null;
 
+            $productCode = $productModel ? (string) $productModel->code : ($line['codigo'] ?? '');
+            $description = $productModel ? $productModel->description : ($line['descricao'] ?? '');
+
+            // Pula linhas sem código nem descrição (ruído do OCR)
+            if (empty(trim($productCode)) && empty(trim($description))) {
+                continue;
+            }
+
             $taxRateCode = $productModel ? (int) $productModel->taxRateCode : $this->resolveTaxRateFromOcr(null);
             $taxRatePercent = (float) TaxRate::where('taxRateCode', $taxRateCode)->value('taxRate') ?? 0;
 
             $enrichedLines[] = [
-                'productCode' => $productModel ? (string) $productModel->code : ($line['codigo'] ?? ''),
-                'description' => $productModel ? $productModel->description : ($line['descricao'] ?? ''),
+                'productCode' => $productCode,
+                'description' => $description,
                 'productFamily' => $productModel ? $productModel->family : $this->ensureDefaultFamily(),
                 'productUnit' => $productModel ? $productModel->unit : $this->ensureDefaultUnit(),
                 'taxRateCode' => $taxRateCode,

@@ -1,24 +1,36 @@
 """
 OCR Processor Module
 ====================
-Handles image preprocessing and text extraction using pytesseract.
+Handles image preprocessing and text extraction using EasyOCR (deep learning).
 Provides layout-aware OCR with bounding box information.
 
 Pipeline improvements:
 - Perspective correction for angled/tilted document photos
-- CLAHE adaptive histogram equalization for better local contrast
-- Sharpening after upscaling for crisper text edges
-- Multi-method thresholding (adaptive + Otsu with fallback)
+- Deskew for rotation correction
+- EasyOCR handles varying resolutions and contrast natively
 """
 import cv2
 import numpy as np
 from PIL import Image
-import pytesseract
+import easyocr
 import re
 from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# ── EasyOCR Reader Singleton ─────────────────────────────────────────────────
+
+_reader: easyocr.Reader | None = None
+
+
+def get_reader() -> easyocr.Reader:
+    global _reader
+    if _reader is None:
+        _reader = easyocr.Reader(['pt', 'en'], gpu=True)
+        logger.info("EasyOCR Reader initialized (pt, en)")
+    return _reader
 
 
 # ── Geometry Helpers ──────────────────────────────────────────────────────────
@@ -177,8 +189,7 @@ def correct_perspective(image: np.ndarray) -> np.ndarray:
     represents an inner content region (e.g. a table or box) rather than the
     full document page. In this case perspective correction is **skipped**
     and the original image is returned — a bad perspective crop is worse than
-    no correction at all. All other enhancements (CLAHE, sharpening, etc.) are
-    still applied later in the pipeline.
+    no correction at all.
 
     Args:
         image: Input BGR image (numpy array)
@@ -220,109 +231,30 @@ def correct_perspective(image: np.ndarray) -> np.ndarray:
     return warped
 
 
-# ── Image Enhancement Helpers ─────────────────────────────────────────────────
-
-def apply_clahe(gray: np.ndarray, clip_limit: float = 2.0,
-                grid_size: tuple[int, int] = (8, 8)) -> np.ndarray:
-    """
-    Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) for
-    improved local contrast. Essential for documents with uneven lighting
-    or shadows (common in photos taken at an angle).
-
-    Args:
-        gray: Grayscale image
-        clip_limit: Contrast clipping limit (higher = more contrast)
-        grid_size: Tile grid size for local equalization
-
-    Returns:
-        Contrast-enhanced grayscale image
-    """
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=grid_size)
-    return clahe.apply(gray)
-
-
-def sharpen_image(img: np.ndarray) -> np.ndarray:
-    """
-    Apply unsharp masking to sharpen the image.
-    Helps text edges become crisper after upscaling.
-
-    Args:
-        img: Input image (grayscale or BGR)
-
-    Returns:
-        Sharpened image
-    """
-    # Gaussian blur
-    blurred = cv2.GaussianBlur(img, (0, 0), 1.5)
-    # Unsharp mask: original + (original - blurred) * amount
-    sharpened = cv2.addWeighted(img, 1.5, blurred, -0.5, 0)
-    return sharpened
-
-
-def auto_threshold(gray: np.ndarray) -> np.ndarray:
-    """
-    Apply the best thresholding method for the given image.
-
-    Tries Otsu's binarization first (works well for high-contrast documents).
-    Falls back to adaptive thresholding if Otsu produces poor results.
-
-    Args:
-        gray: Grayscale image
-
-    Returns:
-        Binary image
-    """
-    # Try Otsu's binarization
-    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Calculate the ratio of white pixels — if reasonable, use Otsu
-    white_ratio = np.sum(otsu == 255) / otsu.size
-    if 0.1 < white_ratio < 0.9:
-        return otsu
-
-    # Fallback to adaptive thresholding
-    binary = cv2.adaptiveThreshold(
-        gray, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        blockSize=31,
-        C=10,
-    )
-    return binary
-
-
 # ── Main Preprocessing Pipeline ───────────────────────────────────────────────
 
 def preprocess_image(image_path: str | Path,
                      output_path: str | Path | None = None) -> np.ndarray:
     """
-    Preprocess an image to maximise OCR quality.
+    Preprocess an image for EasyOCR.
 
-    **IMPORTANT**: Returns a *grayscale* image (not binary). Tesseract
-    performs its own internal binarization which is superior to manual
-    thresholding, especially for small/table text where aggressive
-    preprocessing destroys character structure.
+    **IMPORTANT**: Returns an *RGB* image (EasyOCR expects RGB, not grayscale).
+    EasyOCR performs its own internal contrast handling via its deep learning
+    models, so aggressive thresholding/sharpen is unnecessary.
 
     Pipeline:
     1. Load image
     2. Perspective correction — flatten angled document photos
-    3. Upscale to ≥2000px longest side
-    4. Sharpen — crisp text after upscaling
-    5. Grayscale conversion
-    6. Deskew — rotation correction
-
-    Removed (they destroyed small table text):
-    - Bilateral filter: too aggressive, merged small characters
-    - CLAHE: over-amplified noise in small/thin table text
-    - Auto-threshold + binarization: Tesseract's internal is better
-    - Morphological close: not needed on grayscale
+    3. Upscale to ≥800px shortest side (moderate, for small images)
+    4. Deskew — rotation correction
+    5. Convert to RGB
 
     Args:
         image_path: Path to the input image (JPEG, PNG, TIFF)
         output_path: Optional path to save the preprocessed image for debugging
 
     Returns:
-        Preprocessed grayscale image as numpy array
+        Preprocessed RGB image as numpy array
     """
     # ── 1. Load image ─────────────────────────────────────────────────
     img = cv2.imread(str(image_path))
@@ -338,10 +270,11 @@ def preprocess_image(image_path: str | Path,
     height, width = img.shape[:2]
 
     # ── 3. Upscale small images ───────────────────────────────────────
-    # Target: at least 2000px on the longest side for good OCR
-    min_dim = 2000
-    if max(width, height) < min_dim:
-        scale = min_dim / max(width, height)
+    # Target: at least 800px on the shortest side for good OCR
+    min_dim = 800
+    shortest_side = min(width, height)
+    if shortest_side < min_dim:
+        scale = min_dim / shortest_side
         new_width = int(width * scale)
         new_height = int(height * scale)
         img = cv2.resize(img, (new_width, new_height),
@@ -349,14 +282,8 @@ def preprocess_image(image_path: str | Path,
         logger.info(f"Upscaled to {new_width}x{new_height} (scale={scale:.2f})")
         height, width = img.shape[:2]
 
-    # ── 4. Sharpen ────────────────────────────────────────────────────
-    img = sharpen_image(img)
-
-    # ── 5. Convert to grayscale ───────────────────────────────────────
+    # ── 4. Deskew — rotation correction ───────────────────────────────
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # ── 6. Deskew — rotation correction ───────────────────────────────
-    # Use Otsu threshold ONLY for finding text coordinates (not for final output)
     _, temp_binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     coords = np.column_stack(np.where(temp_binary > 0))
     if len(coords) > 0:
@@ -364,116 +291,157 @@ def preprocess_image(image_path: str | Path,
         if angle < -45:
             angle = 90 + angle
         if abs(angle) > 0.5:
-            (h, w) = gray.shape[:2]
+            (h, w) = img.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            gray = cv2.warpAffine(
-                gray, M, (w, h),
+            img = cv2.warpAffine(
+                img, M, (w, h),
                 flags=cv2.INTER_CUBIC,
                 borderMode=cv2.BORDER_REPLICATE,
             )
             logger.info(f"Deskewed by {angle:.2f} degrees")
 
+    # ── 5. Convert to RGB ─────────────────────────────────────────────
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
     # Save preprocessed image if output path provided
     if output_path:
-        cv2.imwrite(str(output_path), gray)
+        cv2.imwrite(str(output_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
         logger.info(f"Preprocessed image saved to {output_path}")
 
-    return gray
+    return rgb
 
 
-def _assemble_lines_from_ocr_data(ocr_data: dict) -> list[dict]:
+# ── Bbox Conversion Helper ────────────────────────────────────────────────────
+
+def _polygon_to_rect(bbox: list) -> list[int]:
     """
-    Assemble structured lines from pytesseract OCR data.
-    Shared helper used by extract_text_with_layout for each PSM mode.
+    Convert EasyOCR polygon bbox [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
+    to rectangle [x, y, w, h].
     """
-    lines = []
-    current_line = ""
-    current_bbox = None
-    current_conf_sum = 0
-    current_conf_count = 0
+    xs = [p[0] for p in bbox]
+    ys = [p[1] for p in bbox]
+    x = int(min(xs))
+    y = int(min(ys))
+    w = int(max(xs) - x)
+    h = int(max(ys) - y)
+    return [x, y, w, h]
 
-    prev_word_line_num = -1
-    prev_word_block_num = -1
-    prev_word_par_num = -1
 
-    n_boxes = len(ocr_data['level'])
-    for i in range(n_boxes):
-        if ocr_data['level'][i] == 5:  # Word level
-            text = ocr_data['text'][i].strip()
-            conf = int(ocr_data['conf'][i])
+# ── Line Assembly ─────────────────────────────────────────────────────────────
 
-            if text:
-                cur_line_num = ocr_data['line_num'][i]
-                cur_block_num = ocr_data['block_num'][i]
-                cur_par_num = ocr_data['par_num'][i]
+def _assemble_lines_from_ocr_data(results: list) -> list[dict]:
+    """
+    Assemble structured lines from EasyOCR results.
 
-                x, y, w, h = (
-                    ocr_data['left'][i],
-                    ocr_data['top'][i],
-                    ocr_data['width'][i],
-                    ocr_data['height'][i],
-                )
+    EasyOCR returns: [(bbox, text, confidence), ...]
+    where bbox is [[x1,y1],[x2,y2],[x3,y3],[x4,y4]].
 
-                is_new_line = (
-                    prev_word_line_num != -1 and (
-                        cur_line_num != prev_word_line_num or
-                        cur_block_num != prev_word_block_num or
-                        cur_par_num != prev_word_par_num
-                    )
-                )
+    Heuristic:
+    1. Sort detections by Y coordinate (top of bbox)
+    2. Group detections whose vertical intervals overlap (same "line")
+    3. Sort each group by X coordinate (left to right)
+    4. Join group text with spaces → 1 line
+    5. Calculate consolidated bbox and average confidence
 
-                if current_line and is_new_line:
-                    avg_conf = current_conf_sum / max(current_conf_count, 1)
-                    lines.append({
-                        'text': current_line.strip(),
-                        'bbox': current_bbox,
-                        'confidence': round(avg_conf, 1),
-                    })
-                    current_line = ""
-                    current_bbox = None
-                    current_conf_sum = 0
-                    current_conf_count = 0
+    Args:
+        results: EasyOCR readtext() output
 
-                prev_word_line_num = cur_line_num
-                prev_word_block_num = cur_block_num
-                prev_word_par_num = cur_par_num
+    Returns:
+        List of {text, bbox: [x,y,w,h], confidence}
+    """
+    if not results:
+        return []
 
-                separator = " " if current_line else ""
-                current_line += separator + text
-
-                if current_bbox is None:
-                    current_bbox = [x, y, w, h]
-                else:
-                    old_x, old_y = current_bbox[0], current_bbox[1]
-                    current_bbox[0] = min(old_x, x)
-                    current_bbox[1] = min(old_y, y)
-                    current_bbox[2] = max(old_x + current_bbox[2], x + w) - current_bbox[0]
-                    current_bbox[3] = max(old_y + current_bbox[3], y + h) - current_bbox[1]
-
-                current_conf_sum += conf
-                current_conf_count += 1
-
-    if current_line:
-        avg_conf = current_conf_sum / max(current_conf_count, 1)
-        lines.append({
-            'text': current_line.strip(),
-            'bbox': current_bbox,
-            'confidence': round(avg_conf, 1),
+    detections = []
+    for bbox, text, confidence in results:
+        text = text.strip()
+        if not text:
+            continue
+        rect = _polygon_to_rect(bbox)
+        # rect is [x, y, w, h]
+        y_center = rect[1] + rect[3] / 2
+        y_top = rect[1]
+        y_bottom = rect[1] + rect[3]
+        detections.append({
+            'text': text,
+            'bbox': rect,
+            'confidence': confidence,
+            'y_center': y_center,
+            'y_top': y_top,
+            'y_bottom': y_bottom,
+            'x': rect[0],
         })
+
+    if not detections:
+        return []
+
+    # Sort by Y center
+    detections.sort(key=lambda d: d['y_center'])
+
+    # Group by vertical overlap
+    lines = []
+    current_group = [detections[0]]
+    avg_line_height = np.mean([d['bbox'][3] for d in detections])
+    # Tolerate 40% of average line height for vertical grouping
+    y_tolerance = avg_line_height * 0.4
+
+    for d in detections[1:]:
+        # Check if this detection overlaps vertically with the current group
+        group_y_tops = [g['y_top'] for g in current_group]
+        group_y_bottoms = [g['y_bottom'] for g in current_group]
+        group_min_top = min(group_y_tops) - y_tolerance
+        group_max_bottom = max(group_y_bottoms) + y_tolerance
+
+        if d['y_top'] <= group_max_bottom and d['y_bottom'] >= group_min_top:
+            current_group.append(d)
+        else:
+            # Close current group and start a new one
+            lines.append(_flush_line_group(current_group))
+            current_group = [d]
+
+    if current_group:
+        lines.append(_flush_line_group(current_group))
 
     return lines
 
 
+def _flush_line_group(group: list[dict]) -> dict:
+    """
+    Convert a group of same-line detections into a single line entry.
+    Sort words left-to-right and join with spaces.
+    """
+    group.sort(key=lambda d: d['x'])
+
+    text = ' '.join(d['text'] for d in group)
+    confidences = [d['confidence'] for d in group]
+    avg_conf = round(sum(confidences) / len(confidences), 1)
+
+    xs = [d['bbox'][0] for d in group]
+    ys = [d['bbox'][1] for d in group]
+    right_edges = [d['bbox'][0] + d['bbox'][2] for d in group]
+    bottom_edges = [d['bbox'][1] + d['bbox'][3] for d in group]
+
+    x = min(xs)
+    y = min(ys)
+    w = max(right_edges) - x
+    h = max(bottom_edges) - y
+
+    return {
+        'text': text,
+        'bbox': [x, y, w, h],
+        'confidence': avg_conf,
+    }
+
+
+# ── Text Extraction ───────────────────────────────────────────────────────────
+
 def extract_text_with_layout(image_path: str | Path) -> dict:
     """
-    Extract text from an image using Tesseract OCR with layout analysis.
+    Extract text from an image using EasyOCR with layout analysis.
 
-    Tries multiple PSM (Page Segmentation Mode) values and picks the best
-    result using a scoring system that balances text length against output
-    structure quality. Structured PSMs (3 — auto, 4 — single column) are
-    preferred; PSM 11 (sparse text) is only selected when it produces
-    significantly more text.
+    Uses EasyOCR single-pass detection (no multi-PSM fallback needed).
+    EasyOCR uses deep learning models that handle varying layouts natively.
 
     Returns both raw text and structured data with bounding boxes.
 
@@ -483,68 +451,36 @@ def extract_text_with_layout(image_path: str | Path) -> dict:
     Returns:
         dict with keys:
             - raw_text: Full extracted text
-            - lines: List of {text, bbox (x, y, w, h), conf}
+            - lines: List of {text, bbox (x, y, w, h), confidence}
             - tables: Detected tabular regions with cells
-            - psm_used: The PSM mode that produced the best result
+            - hocr: Empty string (not available from EasyOCR)
+            - psm_used: None (not applicable)
     """
     # Preprocess the image
     processed = preprocess_image(image_path)
+    height, width = processed.shape[:2]
+    logger.info(f"Running EasyOCR on {width}x{height} image")
 
-    # Try multiple PSM modes and pick the best based on a combined score
-    # that prefers structured output (3, 4) over sparse (11).
-    psm_modes = [4, 3, 11]
-    best = None
-    best_score = -1.0
+    # Single-pass OCR with EasyOCR
+    reader = get_reader()
+    results = reader.readtext(processed, paragraph=False)
 
-    for psm in psm_modes:
-        custom_config = f'--oem 3 --psm {psm} -l por+eng'
+    logger.info(f"EasyOCR detected {len(results)} text regions")
 
-        raw_text = pytesseract.image_to_string(
-            processed,
-            config=custom_config
-        ).strip()
+    # Assemble raw text and structured lines
+    raw_text = '\n'.join(text for _, text, _ in results) if results else ''
 
-        length = len(raw_text)
+    lines = _assemble_lines_from_ocr_data(results)
 
-        # Score: structured PSMs get a bonus so that PSM 11 needs ~25% more
-        # text to be preferred. This avoids broken line-level output.
-        structure_bonus = 1.25 if psm in (3, 4) else 1.0
-        score = length * structure_bonus
+    logger.info(f'OCR complete: {len(raw_text)} chars, {len(lines)} lines')
 
-        logger.info(
-            f"PSM {psm}: {length} chars (score={score:.0f}, "
-            f"bonus={structure_bonus:.2f})"
-        )
-
-        if score > best_score:
-            ocr_data = pytesseract.image_to_data(
-                processed,
-                config=custom_config,
-                output_type=pytesseract.Output.DICT
-            )
-
-            hocr_output = pytesseract.image_to_pdf_or_hocr(
-                processed,
-                extension='hocr',
-                config=custom_config
-            )
-
-            lines = _assemble_lines_from_ocr_data(ocr_data)
-
-            best = {
-                'raw_text': raw_text,
-                'lines': lines,
-                'tables': detect_tables(lines),
-                'hocr': hocr_output.decode('utf-8') if isinstance(hocr_output, bytes) else hocr_output,
-                'psm_used': psm,
-            }
-            best_score = score
-
-    # best is guaranteed non-None because psm_modes is non-empty
-    logger.info(f'OCR PSM selection: tried {psm_modes}, picked PSM {best["psm_used"]} '
-                f'({len(best["raw_text"])} chars, {len(best["lines"])} lines)')
-
-    return best
+    return {
+        'raw_text': raw_text,
+        'lines': lines,
+        'tables': detect_tables(lines),
+        'hocr': '',
+        'psm_used': None,
+    }
 
 
 def _has_product_unit(text: str) -> bool:
@@ -628,9 +564,10 @@ def extract_text_simple(image_path: str | Path) -> str:
     """
     Simple text extraction without layout (fallback).
 
-    Uses PSM 3 (automatic page segmentation) for general documents.
+    Uses EasyOCR with paragraph mode for general documents.
     """
     processed = preprocess_image(image_path)
-    custom_config = r'--oem 3 --psm 3 -l por+eng'
-    text = pytesseract.image_to_string(processed, config=custom_config)
+    reader = get_reader()
+    results = reader.readtext(processed, paragraph=False)
+    text = '\n'.join(t for _, t, _ in results) if results else ''
     return text.strip()

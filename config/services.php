@@ -40,15 +40,15 @@ return [
     | OCR Service — Python microservice for document understanding
     |--------------------------------------------------------------------------
     |
-    | The OCR service runs a FastAPI server that uses Tesseract with image
-    | preprocessing and Ollama (local LLM) for document understanding.
+    | The OCR service runs a FastAPI server that uses EasyOCR with image
+    | preprocessing and llama-cpp (local LLM) for document understanding.
     |
     | Start the service with: python ocr-service/app.py
     |
     */
     'ocr' => [
         'base_url' => env('OCR_SERVICE_URL', 'http://127.0.0.1:5050'),
-        'ollama_model' => env('OCR_OLLAMA_MODEL', 'qwen2.5:7b'),
+        'llm_model' => env('OCR_LLM_MODEL', 'qwen2.5-7b-instruct-q4_k_m'),
         'timeout' => env('OCR_SERVICE_TIMEOUT', 120),
     ],
 
