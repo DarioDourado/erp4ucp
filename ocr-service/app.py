@@ -166,12 +166,42 @@ async def analyze_document(
 
         logger.info(f"OCR extracted {len(raw_text)} chars, {len(ocr_lines)} lines, {len(tables)} tables")
 
+        # ── Build assembled text for LLM ────────────────────────────────
+        # raw_text has each OCR detection on its own line (e.g. product
+        # code, description, qty, and price on separate lines). This
+        # makes table reconstruction impossible for the LLM.
+        # ocr_lines has detections already grouped into logical lines
+        # (e.g. "PRD-001 Arroz Agulha 50 CX 1,25 62,50"). Use this
+        # assembled format so the LLM can understand the table structure.
+        if ocr_lines:
+            assembled_text = '\n'.join(l['text'] for l in ocr_lines)
+            logger.info(f"Assembled text for LLM: {len(assembled_text)} chars from {len(ocr_lines)} lines")
+        else:
+            assembled_text = raw_text
+
+        # ── DIAGNOSTIC: Log full OCR raw text and assembled text ─────
+        logger.info(f"DIAGNOSTIC OCR RAW TEXT ({len(raw_text)} chars):\n{raw_text[:2000]}")
+        logger.info(f"DIAGNOSTIC OCR ASSEMBLED TEXT ({len(assembled_text)} chars):\n{assembled_text[:2000]}")
+        # Save full texts to temp files for debugging
+        import tempfile as tmpfile_mod
+        try:
+            diag_dir = Path(tempfile.gettempdir()) / "erp4u_ocr_diagnostics"
+            diag_dir.mkdir(exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            raw_file = diag_dir / f"raw_text_{timestamp}.txt"
+            assembled_file = diag_dir / f"assembled_text_{timestamp}.txt"
+            raw_file.write_text(raw_text, encoding="utf-8")
+            assembled_file.write_text(assembled_text, encoding="utf-8")
+            logger.info(f"DIAGNOSTIC: Full OCR texts saved to {diag_dir}")
+        except Exception as diag_err:
+            logger.warning(f"DIAGNOSTIC: Could not save debug files: {diag_err}")
+
         # ── Step 2: LLM Document Understanding ──────────────────────────
         parsed_data = None
         if use_llm:
             try:
                 parsed = analyze_document_with_llm(
-                    ocr_text=raw_text,
+                    ocr_text=assembled_text,
                     model=model,
                 )
                 parsed_data = parsed.to_dict()
@@ -187,6 +217,7 @@ async def analyze_document(
         response_data = {
             "parsed": parsed_data,
             "ocr_text": raw_text,
+            "ocr_assembled": assembled_text if ocr_lines else raw_text,
         }
 
         return AnalysisResponse(

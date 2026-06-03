@@ -21,190 +21,72 @@ logger = logging.getLogger(__name__)
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
 DEFAULT_MODEL = os.environ.get("LLM_MODEL", "qwen2.5-7b-instruct-q4_k_m")
+LLM_MAX_CONTEXT = int(os.environ.get("LLM_MAX_CONTEXT", "4096"))
 
-SYSTEM_PROMPT = """You are a specialized document understanding AI for Portuguese purchase orders (encomendas a fornecedores).
+SYSTEM_PROMPT = """You are a specialized AI for extracting structured data from Portuguese purchase order (encomenda a fornecedor) OCR text.
 
-Your task is to analyze OCR text extracted from a purchase order document and extract structured data.
+CRITICAL: Extract EVERY product line. Do not skip or omit any. Count lines in input → produce same count in output.
 
-CRITICAL RULE — EXTRACT EVERY LINE:
-- You MUST extract EVERY SINGLE product line present in the document. Do NOT skip or omit any line.
-- Count how many product lines exist in the OCR text, and ensure your output contains the same number.
-- If the OCR text shows 5 product references, your JSON must have 5 entries in the "lines" array.
-- For bracket/pipe format tables, each row is a separate line — extract them ALL.
+HEADER DETECTION: Scan for a header row first. Common Portuguese headers:
+Code: Ref./Referência/Cód./Código/Art./Artigo
+Desc: Descrição/Designação/Artigo/Produto
+Qty: Qtd./Quant./Quantidade/Un./Qtd Enc (ordered) vs Qtd Ent (delivered, ignore)
+Price: Pr. Unit./Preço Unit./P. Unit./Valor Unit./Preço
+Total: Total/Valor/Import./Líquido
+VAT: IVA/Taxa/%
+Unit: Un./UN/Unidade/Medida
+If no header, infer from data pattern. Different suppliers = different column orders.
 
-Rules:
-1. Extract ONLY the information that is clearly present in the text.
-2. For the supplier name, look for text near labels like "FORNECEDOR:", "Fornecedor", "Supplier".
-3. For NIF, extract exactly 9 digits (remove any spaces or punctuation).
-4. For dates, format as YYYY-MM-DD.
-5. For each product line found in the document, extract: product code, description, quantity, unit price.
-6. If a field cannot be determined, use null or empty string — but still include the line if any data is present.
-7. Respond in VALID JSON format only, without any additional text or markdown formatting.
-8. The response must be a valid JSON object that can be parsed directly.
+SUPPLIER: Look near "FORNECEDOR:", "Fornecedor", "Cliente:". NIF = 9 digits (from NIF:/NIPC:/Contribuinte:). Date → YYYY-MM-DD.
 
-IMPORTANT: The text comes from OCR and may have recognition errors. Use context to infer the correct values. Portuguese text may have accented characters that were misrecognized.
+LAYOUT VARIATIONS:
+A) Simple: "CODE  DESC  QTY  PRICE"
+B) Table with headers then data rows
+C) Bracket/pipe: "CODE [DESC | QTY[unit] PRICE] VAT% | TOTAL"
+D) Multi-column grid (scattered OCR)
+E) Rich table with Qtd Enc + Qtd Ent + multiple value columns
 
-NOTE ABOUT TABLE FORMATS: Supplier documents often use table-like formats with brackets [ ] and pipes | to separate columns.
-For example a line like: "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
-Should be parsed as: code="0122", description="Batata Monalisa Sac 10kg", quantity=5, unitPrice=8.60
+NUMBER HANDLING:
+- Portuguese comma = decimal (1,15=1.15). Thousands dot (1.000=1000). Convert to standard decimal.
+- VAT rates (6%,13%,23%) are NOT quantities or prices. Row-end Total is NOT unit price.
+- Embedded numbers in descriptions (25KG, 500ML, M8x20) stay in description.
 
-The pattern is: CODE [DESCRIPTION | QTY unit PRICE] VAT% | TOTAL
-- CODE comes first (2-4 digits)
-- DESCRIPTION is between [ and | (or between [ and first numeric if no |)
-- QTY is the first number after the description separator
-- PRICE is the number after the QTY/unit
-- Ignore VAT percentages (6%, 23%, etc.) and totals at the end of each line
+OCR text may have recognition errors — use context to infer. Accented chars may be misrecognized. Strip bracket/pipe/percentage artifacts from descriptions. Merge wrapped description lines. Respond in VALID JSON only, no markdown."""
 
-Parse EVERY line with this format, even if some lines have garbled OCR text due to recognition errors."""
-
-FEW_SHOT_EXAMPLES = """
-Example 1 (simple format):
-Input text:
-```
-ENCOMENDA Nº 2025/058
-FORNECEDOR: Distribuidora Lusitânia, Lda
-NIF: 500123456
-DATA DA ENCOMENDA: 20/05/2025
+FEW_SHOT_EXAMPLES = """Example 1 (simple: code + desc + qty + price):
+Input:
+ENCOMENDA Nº 2025/058 | FORNECEDOR: Distribuidora Lusitânia, Lda | NIF: 500123456 | DATA: 20/05/2025
 1001  Arroz Agulha  20  1,15
 1002  Massa Espiral  24  0,79
-```
 
-Output:
-{
-  "supplier": {
-    "name": "Distribuidora Lusitânia, Lda",
-    "nif": "500123456",
-    "address": null
-  },
-  "documentDate": "2025-05-20",
-  "documentNumber": "2025/058",
-  "lines": [
-    {
-      "productCode": "1001",
-      "productDescription": "Arroz Agulha",
-      "quantity": 20.0,
-      "unitPrice": 1.15
-    },
-    {
-      "productCode": "1002",
-      "productDescription": "Massa Espiral",
-      "quantity": 24.0,
-      "unitPrice": 0.79
-    }
-  ],
-  "totalNet": null,
-  "totalGross": null
-}
+Output: {"supplier":{"name":"Distribuidora Lusitânia, Lda","nif":"500123456","address":null},"documentDate":"2025-05-20","documentNumber":"2025/058","lines":[{"productCode":"1001","productDescription":"Arroz Agulha","quantity":20.0,"unitPrice":1.15,"unit":null},{"productCode":"1002","productDescription":"Massa Espiral","quantity":24.0,"unitPrice":0.79,"unit":null}],"totalNet":null,"totalGross":null}
 
-Example 2 (table with headers):
-Input text:
-```
-FACTURA Nº FT-2025/123
-DATA: 15-03-2025
-FORNECEDOR: Azeites do Sul, SA
-NIF: 509876543
-CONTRIBUINTE: 509876543
-ARTIGO          QTD  PRECO  IVA
-AZEITE VIRGEM 500ML  50  3.20  13%
-AZEITE GALA 1L      30  5.50  13%
-VINHO TINTO 75CL     20  2.80  23%
-```
+Example 2 (table with headers Ref./Designação/Quant./Pr. Unit./Valor):
+Input:
+Fornecedor: Frutaria do Largo, Lda | NIF: 512345678 | Data: 10/05/2025 | Encomenda Nº: 2025/042
+Ref.  Designação           Quant.  Pr. Unit.  Valor
+0088  Maçã Golden 20KG     8       12,50      100,00
+0099  Pêra Rocha 10KG      15      8,75       131,25
+Total Líquido: 281,00
 
-Output:
-{
-  "supplier": {
-    "name": "Azeites do Sul, SA",
-    "nif": "509876543",
-    "address": null
-  },
-  "documentDate": "2025-03-15",
-  "documentNumber": "FT-2025/123",
-  "lines": [
-    {
-      "productCode": null,
-      "productDescription": "AZEITE VIRGEM 500ML",
-      "quantity": 50.0,
-      "unitPrice": 3.20
-    },
-    {
-      "productCode": null,
-      "productDescription": "AZEITE GALA 1L",
-      "quantity": 30.0,
-      "unitPrice": 5.50
-    },
-    {
-      "productCode": null,
-      "productDescription": "VINHO TINTO 75CL",
-      "quantity": 20.0,
-      "unitPrice": 2.80
-    }
-  ],
-  "totalNet": null,
-  "totalGross": null
-}
+Output: {"supplier":{"name":"Frutaria do Largo, Lda","nif":"512345678","address":null},"documentDate":"2025-05-10","documentNumber":"2025/042","lines":[{"productCode":"0088","productDescription":"Maçã Golden 20KG","quantity":8.0,"unitPrice":12.50,"unit":"KG"},{"productCode":"0099","productDescription":"Pêra Rocha 10KG","quantity":15.0,"unitPrice":8.75,"unit":"KG"}],"totalNet":281.00,"totalGross":null}
 
-Example 3 (bracket/pipe table format — extract ALL 5 lines):
-Input text:
-```
+Example 3 (bracket/pipe format: CODE [DESC | QTY[unit] PRICE] VAT% | TOTAL):
+Input:
 0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)
 0344 [Tomate Chucha Amad. 25KG | 25[KG| 1,85] 6% | 46,25|
-0091 [Cebola Doce Pérola | 15|kG| 1.40] 6% | 21,00]
-1102 [Couve Coração Seleção | 12|uN| 0.98] 6% | 11,40
 0551 Salsa Frisada Molho 20] UN 6%
-```
 
-Output:
-{
-  "supplier": {
-    "name": null,
-    "nif": null,
-    "address": null
-  },
-  "documentDate": null,
-  "documentNumber": null,
-  "lines": [
-    {
-      "productCode": "0122",
-      "productDescription": "Batata Monalisa Sac 10kg",
-      "quantity": 5.0,
-      "unitPrice": 8.60
-    },
-    {
-      "productCode": "0344",
-      "productDescription": "Tomate Chucha Amad. 25KG",
-      "quantity": 25.0,
-      "unitPrice": 1.85
-    },
-    {
-      "productCode": "0091",
-      "productDescription": "Cebola Doce Pérola",
-      "quantity": 15.0,
-      "unitPrice": 1.40
-    },
-    {
-      "productCode": "1102",
-      "productDescription": "Couve Coração Seleção",
-      "quantity": 12.0,
-      "unitPrice": 0.98
-    },
-    {
-      "productCode": "0551",
-      "productDescription": "Salsa Frisada Molho",
-      "quantity": 20.0,
-      "unitPrice": null
-    }
-  ],
-  "totalNet": null,
-  "totalGross": null
-}
+Output: {"supplier":null,"lines":[{"productCode":"0122","productDescription":"Batata Monalisa Sac 10kg","quantity":5.0,"unitPrice":8.60,"unit":"CX"},{"productCode":"0344","productDescription":"Tomate Chucha Amad. 25KG","quantity":25.0,"unitPrice":1.85,"unit":"KG"},{"productCode":"0551","productDescription":"Salsa Frisada Molho","quantity":20.0,"unitPrice":null,"unit":"UN"}]}
 
-IMPORTANT: Notice that in Example 3, ALL 5 lines are extracted even when:
-- Line 2 has garbled OCR text around the numbers (Tomate Chucha Amad. 25KG)
-- Line 5 has a different format (no brackets, code+description+number at end)
-- Some lines have quantity embedded with unit markers like [Cx], [KG], [UN]
-- Some unit prices are followed by VAT% and totals
-
-ALWAYS extract every line from the document — never skip any product entry."""
+KEY RULES:
+- Identify column headers FIRST, then map data columns. Different suppliers use different column orders.
+- \"Qtd Enc\" = quantity ordered (use this); \"Qtd Ent\" = delivered (ignore).
+- The row-end \"Total\" column is NOT unit price. Skip VAT rates (6%, 13%, 23%).
+- Extract unit from hints: Cx→CX, Kg→KG, Un→UN, Sac→KG, Molho→MOLHO, L→L, Ml→ML.
+- Portuguese comma = decimal (1,15=1.15). Thousands use dot (1.000=1000).
+- Extract ALL product lines. Never include header/divider/summary rows.
+- Return ONLY valid JSON, no markdown or extra text."""
 
 
 @dataclass
@@ -254,30 +136,56 @@ def analyze_document_with_llm(
     """
     chat_url = llm_url.rstrip("/") + "/chat/completions"
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"""{FEW_SHOT_EXAMPLES}
-
-Now analyze this purchase order document and extract the structured data.
+    USER_TEMPLATE_HEAD = """Now analyze this purchase order document and extract the structured data.
 Return ONLY valid JSON, no other text.
 
 OCR Text:
 ```
-{ocr_text}
-```"""},
+"""
+    USER_TEMPLATE_TAIL = """```"""
+
+    prompt_overhead_tokens = (
+        _estimate_tokens(SYSTEM_PROMPT)
+        + _estimate_tokens(FEW_SHOT_EXAMPLES)
+        + _estimate_tokens(USER_TEMPLATE_HEAD)
+        + _estimate_tokens(USER_TEMPLATE_TAIL)
+    )
+    available_tokens = LLM_MAX_CONTEXT - prompt_overhead_tokens - 512
+    max_ocr_chars = max(1000, available_tokens * 4)
+
+    original_len = len(ocr_text)
+    truncated_text = _truncate_ocr_text(ocr_text, max_ocr_chars)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"""{FEW_SHOT_EXAMPLES}
+
+{USER_TEMPLATE_HEAD}{truncated_text}
+{USER_TEMPLATE_TAIL}"""},
     ]
 
     logger.info(f"Sending document to LLM (llama-cpp) model: {model} at {chat_url}")
-    logger.debug(f"OCR text length: {len(ocr_text)} chars")
+    logger.debug(f"OCR text length: {original_len} chars (sent: {len(truncated_text)} chars)")
 
     try:
+        estimated_prompt_tokens = (
+            prompt_overhead_tokens
+            + _estimate_tokens(truncated_text)
+        )
+        dynamic_max_tokens = max(512, LLM_MAX_CONTEXT - estimated_prompt_tokens - 128)
+        logger.debug(
+            f"Est. prompt tokens: {estimated_prompt_tokens}, "
+            f"max_tokens: {dynamic_max_tokens}, "
+            f"context: {LLM_MAX_CONTEXT}"
+        )
+
         response = requests.post(
             chat_url,
             json={
                 "model": model,
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": 4096,
+                "max_tokens": dynamic_max_tokens,
             },
             timeout=120,
         )
@@ -286,6 +194,8 @@ OCR Text:
 
         llm_output = result["choices"][0]["message"]["content"].strip()
         logger.debug(f"LLM raw response: {llm_output[:500]}...")
+        # DIAGNOSTIC: Log full LLM response
+        logger.info(f"DIAGNOSTIC LLM FULL RESPONSE ({len(llm_output)} chars):\n{llm_output[:2000]}")
 
         parsed = _extract_json_from_llm_output(llm_output)
 
@@ -298,6 +208,21 @@ OCR Text:
 
             llm_prices = sum(1 for l in doc.lines if l.get('unitPrice'))
             fb_prices = sum(1 for l in fallback_doc.lines if l.get('unitPrice'))
+
+            # DIAGNOSTIC: Log LLM vs fallback comparison with line details
+            logger.info(
+                f"DIAGNOSTIC PARSER COMPARISON: "
+                f"LLM={llm_lines} lines/{llm_prices} prices, "
+                f"Fallback={fb_lines} lines/{fb_prices} prices, "
+                f"LLM supplier={doc.supplier.get('name')}, "
+                f"LLM date={doc.documentDate}, "
+                f"FB supplier={fallback_doc.supplier.get('name')}, "
+                f"FB date={fallback_doc.documentDate}"
+            )
+            for i, line in enumerate(doc.lines[:5]):
+                logger.info(f"DIAGNOSTIC LLM line[{i}]: code={line.get('productCode')}, desc={line.get('productDescription')}, qty={line.get('quantity')}, price={line.get('unitPrice')}")
+            for i, line in enumerate(fallback_doc.lines[:5]):
+                logger.info(f"DIAGNOSTIC FB line[{i}]: code={line.get('productCode')}, desc={line.get('productDescription')}, qty={line.get('quantity')}, price={line.get('unitPrice')}")
 
             if fb_lines > llm_lines or fb_prices > llm_prices:
                 logger.warning(
@@ -367,11 +292,13 @@ def _convert_to_parsed_document(data: dict) -> ParsedDocument:
     for line in raw_lines:
         if isinstance(line, dict):
             raw_desc = str(line.get("productDescription") or "").strip()
+            raw_unit = str(line.get("unit") or "").strip().upper()
             cleaned_line = {
                 "productCode": str(line.get("productCode") or "").strip() or None,
                 "productDescription": _clean_description(raw_desc) or None,
                 "quantity": _to_float(line.get("quantity")),
                 "unitPrice": _to_float(line.get("unitPrice")),
+                "unit": raw_unit or None,
             }
             if cleaned_line["productDescription"] or cleaned_line["productCode"]:
                 doc.lines.append(cleaned_line)
@@ -394,6 +321,7 @@ def _clean_description(desc: str) -> str:
       "Couve Coração Seleção | 12[UN|oss|"  -> "Couve Coração Seleção"
       "Batata Monalisa Sac 10kg | 5[Cx]"    -> "Batata Monalisa Sac 10kg"
       "[Couve Coração Seleção"              -> "Couve Coração Seleção"
+      ", , , ,"                             -> ""  (all commas = empty)
     """
     import re
 
@@ -411,6 +339,23 @@ def _clean_description(desc: str) -> str:
     desc = re.sub(r'\s*\[[^\]]*\]', '', desc).strip()
     desc = re.sub(r'\s*\)\s*$', '', desc).strip()
     desc = re.sub(r'\s{2,}', ' ', desc).strip()
+
+    # Remove internal comma artifacts (e.g., ", ," from table cell edges misread by OCR)
+    desc = re.sub(r'(?:\s*,\s*){2,}', ' ', desc).strip()
+    # Remove dash/hyphen artifacts (e.g., "---" or "- - -" from table borders misread by OCR)
+    # Also handles Unicode dash variants (– U+2013, — U+2014, − U+2212)
+    desc = re.sub(r'(?:[-–—−]+\s*){2,}', ' ', desc).strip()
+    desc = re.sub(r'\s{2,}', ' ', desc).strip()
+
+    # Remove common OCR artifacts that remain after cleaning
+    desc = re.sub(r'^[-–—−,.\s;|\])]+', '', desc).strip()
+    desc = re.sub(r'[-–—−,.\s;|\])]+$', '', desc).strip()
+
+    # If the description became only punctuation/spaces, return empty
+    # À-ÿ range includes Portuguese accented characters (ã, ç, ê, ó, etc.)
+    alpha_clean = re.sub(r'[^A-Za-z0-9À-ÿ]', '', desc)
+    if len(alpha_clean) < 2:
+        return ""
 
     return desc
 
@@ -431,7 +376,7 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
     import re
 
     stripped = line.strip()
-    code_m = re.match(r'^(\d{2,4})\s+', stripped)
+    code_m = re.match(r'^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s+', stripped)
     if not code_m:
         return None
 
@@ -466,6 +411,18 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
             return None
 
     # ── Extract qty and price from data part ──
+    # First, extract unit from bracket markers [Cx], [KG], [UN], [KG|, |uN|, etc.
+    unit_matches = re.findall(r'\[([A-Za-z]+)', data_raw)
+    if not unit_matches:
+        unit_matches = re.findall(r'\|([A-Za-z]+)\|', data_raw)
+    unit = unit_matches[-1].upper() if unit_matches else None
+    if unit and unit in {'KG', 'CX', 'UN', 'G', 'L', 'ML', 'LT', 'MM', 'CM', 'M', 'PCT', 'SAC', 'MOLHO', 'DOSE'}:
+        pass
+    else:
+        # Also check for unit in parentheses or standalone after quantity
+        unit_words = re.findall(r'\b(KG|CX|UN|G|ML|LT|L|M|PCT|SAC|MOLHO)\b', data_raw, re.IGNORECASE)
+        unit = unit_words[-1].upper() if unit_words else None
+
     # Remove bracket content like [Cx], [KG], [UN], [KG| (unit markers)
     data_clean = re.sub(r'\[[A-Za-z|]+\]?', ' ', data_raw)
     # Remove closing brackets that are artifacts
@@ -484,6 +441,7 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
                 "productDescription": _clean_description(desc),
                 "quantity": _to_float(numbers_raw[0]),
                 "unitPrice": None,
+                "unit": unit,
             }
         return None
 
@@ -526,19 +484,360 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
         "productDescription": _clean_description(desc),
         "quantity": qty if isinstance(qty, (int, float)) else _to_float(qty),
         "unitPrice": price if isinstance(price, (int, float)) else _to_float(price),
+        "unit": unit,
     }
+
+
+def _detect_column_structure(lines: list[str]) -> dict:
+    """
+    Detect column headers in a purchase order document and return a
+    mapping of column type → position index (0-based).
+
+    Scans lines for a header row with column labels like:
+      "Ref.  Designação  Quant.  Pr. Unit.  Valor"
+      "Cód.  Descrição   Qtd Enc  Qtd Ent  Preço  Total"
+
+    Returns:
+        dict with keys: code_col, desc_col, qty_col, price_col, total_col, unit_col
+        Each value is a 0-based column index, or None if not detected.
+        'column_count' gives the total number of columns found in the header.
+        'header_line_idx' is the line index of the detected header.
+    """
+    import re
+
+    # Known column header patterns mapped to canonical keys
+    COLUMN_DEFS = {
+        'code': [
+            r'\bRef\.?\b', r'\bReferencia\b', r'\bC[oó]d\.?\b', r'\bC[oó]digo\b',
+            r'\bCod\.?\b', r'\bArt\.?\b', r'\bArtigo\b', r'\bRef\b',
+        ],
+        'desc': [
+            r'\bDescri[cç][aã]o\b', r'\bDesigna[cç][aã]o\b', r'\bArtigo\b',
+            r'\bProduto\b', r'\bDesc\.?\b', r'\bDesign\.?\b',
+        ],
+        'qty': [
+            r'\bQtd\.?\s*Enc', r'\bQuant\.?\s*Enc', r'\bQtd\.?\b', r'\bQuant\.?\b',
+            r'\bQuantidade\b', r'\bQty\b', r'\bQtd\b', r'\bUnid\.?\b',
+            r'\bUn\.?\b', r'\bUnidades?\b',
+        ],
+        'qty_delivered': [
+            r'\bQtd\.?\s*Ent', r'\bQuant\.?\s*Ent', r'\bQtd\.?\s*Rec',
+            r'\bEntregue\b', r'\bRecebido\b',
+        ],
+        'price': [
+            r'\bPr\.?\s*Unit\.?\b', r'\bPre[cç]o\s*Unit\.?\b', r'\bP\.?\s*Unit\.?\b',
+            r'\bValor\s*Unit\.?\b', r'\bPre[cç]o\b', r'\bUnit\.?\s*Price\b',
+            r'\bPr\.?\b',
+        ],
+        'total': [
+            r'\bTotal\b', r'\bValor\b', r'\bImport\.?\b', r'\bImport[aâ]ncia\b',
+            r'\bL[ií]quido\b',
+        ],
+        'vat': [
+            r'\bIVA\b', r'\bTaxa\b', r'\bIVA\s*%', r'\b%\s*IVA\b',
+        ],
+        'unit': [
+            r'\bUn\.?\b', r'\bUN\b', r'\bUnidade\b', r'\bMedida\b',
+        ],
+    }
+
+    # Lines that look like header separators (dashes, equals)
+    separator_pattern = re.compile(r'^[\s\-_=]{5,}$')
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if separator_pattern.match(stripped):
+            continue
+        # Skip lines that have a lot of numbers (likely data, not header)
+        digit_ratio = sum(c.isdigit() for c in stripped) / max(len(stripped), 1)
+        if digit_ratio > 0.3:
+            continue
+
+        # For each column type, check if any known pattern matches
+        # and record the match position
+        found_columns = {}  # canonical_key -> (start_pos, end_pos)
+
+        for canonical_key, patterns in COLUMN_DEFS.items():
+            for pattern in patterns:
+                match = re.search(pattern, stripped, re.IGNORECASE)
+                if match:
+                    start = match.start()
+                    end = match.end()
+                    # Only keep the earliest match for this key, or prefer
+                    # matches that don't overlap with already-found columns
+                    if canonical_key not in found_columns:
+                        found_columns[canonical_key] = (start, end)
+                    break
+
+        # Need at least 2 known columns to consider this a header row
+        if len(found_columns) >= 2:
+            # Sort columns by their position in the line
+            sorted_cols = sorted(found_columns.items(), key=lambda x: x[1][0])
+
+            # Build column structure
+            col_map = {
+                'code_col': None, 'desc_col': None, 'qty_col': None,
+                'qty_delivered_col': None, 'price_col': None, 'total_col': None,
+                'vat_col': None, 'unit_col': None,
+                'column_count': len(sorted_cols),
+                'header_line_idx': idx,
+                'column_names': [key for key, _ in sorted_cols],
+            }
+
+            for col_idx, (canonical_key, _) in enumerate(sorted_cols):
+                if canonical_key == 'code':
+                    col_map['code_col'] = col_idx
+                elif canonical_key == 'desc':
+                    col_map['desc_col'] = col_idx
+                elif canonical_key == 'qty':
+                    col_map['qty_col'] = col_idx
+                elif canonical_key == 'qty_delivered':
+                    col_map['qty_delivered_col'] = col_idx
+                elif canonical_key == 'price':
+                    col_map['price_col'] = col_idx
+                elif canonical_key == 'total':
+                    col_map['total_col'] = col_idx
+                elif canonical_key == 'vat':
+                    col_map['vat_col'] = col_idx
+                elif canonical_key == 'unit':
+                    col_map['unit_col'] = col_idx
+
+            logger.info(f"Detected column structure at line {idx}: {col_map['column_names']}")
+            return col_map
+
+    return {
+        'code_col': None, 'desc_col': None, 'qty_col': None,
+        'qty_delivered_col': None, 'price_col': None, 'total_col': None,
+        'vat_col': None, 'unit_col': None,
+        'column_count': 0, 'header_line_idx': None, 'column_names': [],
+    }
+
+
+def _parse_data_line_with_columns(
+    line: str, col_map: dict
+) -> dict | None:
+    """
+    Parse a data line using the detected column structure.
+
+    Extracts code and description from tokens, then identifies
+    quantity and unit price from trailing numeric tokens (accounting
+    for variable-width descriptions). VAT rates and total column
+    values are filtered out automatically.
+    """
+    import re
+
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    # Split line into tokens (words and numbers, preserving brackets)
+    tokens = re.findall(r'(?:\[?[A-Za-zÀ-ÿ0-9.,%/)+-]+\]?)', stripped)
+    tokens = [t.strip() for t in tokens if t.strip()]
+    if not tokens:
+        return None
+
+    total_cols = col_map.get('column_count', 0)
+    if total_cols < 2:
+        return None
+
+    result = {
+        "productCode": None,
+        "productDescription": None,
+        "quantity": None,
+        "unitPrice": None,
+        "unit": None,
+    }
+
+    # ── Detect unit from tokens (before description parsing) ──
+    unit_keywords = {'KG', 'CX', 'UN', 'G', 'L', 'ML', 'LT', 'M', 'PCT', 'SAC', 'MOLHO', 'EMB', 'PAR', 'DOSE'}
+    for token in tokens:
+        upper = token.strip('[]|()').upper()
+        if upper in unit_keywords:
+            result["unit"] = upper
+            break
+
+    # ── Extract code (first token if it matches code pattern) ──
+    code_idx = col_map.get('code_col')
+    code_token = None
+    if code_idx is not None and code_idx < len(tokens):
+        code_token = tokens[code_idx]
+    if code_token and re.match(r'^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?$', code_token):
+        result["productCode"] = code_token
+    else:
+        code_token = None  # no valid code found
+
+    # ── Compute description range ──
+    # Description starts after code; ends before the trailing numeric block
+    # (quantity → unit → price → vat → total).  Embedded numbers in the
+    # description ("Pack 4", "25KG") must NOT split it, so we identify the
+    # boundary by scanning forward for the *last* isolated numeric token
+    # that is part of the multi-number trailing block.
+    desc_idx = col_map.get('desc_col')
+    desc_start = desc_idx if desc_idx is not None else (code_idx + 1 if code_idx is not None else 0)
+    desc_end = len(tokens)
+
+    if desc_start < len(tokens):
+        # Collect numeric token positions after desc_start
+        num_positions = []
+        for i in range(desc_start, len(tokens)):
+            if re.match(r'^\d+(?:[.,]\d+)?$', tokens[i]):
+                num_positions.append(i)
+
+        if num_positions:
+            # Walk backwards through numeric positions to find the start
+            # of the trailing numeric block.  A gap of 1–2 non-numeric
+            # tokens (unit, vat %) is expected between qty/price/total.
+            # A gap of 3+ tokens means the number is embedded in the
+            # description, not part of the numeric columns.
+            block_start = num_positions[-1]  # last number = total
+            prev_pos = num_positions[-1]
+            for pos in reversed(num_positions[:-1]):
+                gap = prev_pos - pos - 1
+                if gap <= 2:
+                    # Small gap — still in the trailing numeric block
+                    block_start = pos
+                    prev_pos = pos
+                else:
+                    # Large gap — this number is in the description.
+                    # Description boundary is right after this gap.
+                    break
+            desc_end = block_start
+
+    # Parse description from the identified token range
+    if desc_start < desc_end:
+        desc_parts = tokens[desc_start:desc_end]
+        # Filter out tokens that look like VAT rates, standalone numbers,
+        # unit keywords (handled separately), or bracket artifacts
+        desc_clean = ' '.join(
+            t for t in desc_parts
+            if not re.match(r'^(?:6|13|23)\s*%?$', t)
+            and not re.match(r'^\d+([.,]\d+)?\s*%?$', t)
+            and t.strip('[]|()').upper() not in unit_keywords
+            and t not in {'[', ']', '|', '(', ')'}
+        ).strip()
+        if desc_clean:
+            result["productDescription"] = _clean_description(desc_clean)
+
+    # ── Extract quantity and price from trailing numeric tokens ──
+    # Instead of using absolute column indices (which break when
+    # description width varies), extract ALL numbers from the trailing
+    # section and use the same heuristic as the legacy fallback parser.
+    trailing = tokens[desc_end:]
+    numeric_vals = []
+    for t in trailing:
+        # Only keep pure numbers (not units, not VAT percentages)
+        if re.match(r'^\d+(?:[.,]\d+)?$', t):
+            val = _to_float(t)
+            if val is not None:
+                numeric_vals.append(val)
+        elif re.match(r'^\d+\s*%$', t):
+            # VAT percentage token — skip
+            pass
+
+    vat_rates = {6, 6.0, 13, 13.0, 23, 23.0}
+
+    if len(numeric_vals) >= 2:
+        # Heuristic: skip VAT-like values and totals
+        # A total ≈ qty × price within 15% tolerance
+        filtered = []
+        for val in numeric_vals:
+            if val in vat_rates and len(filtered) >= 1:
+                continue
+            if len(filtered) >= 2 and filtered[-2] and filtered[-1]:
+                expected = filtered[-2] * filtered[-1]
+                if expected > 0 and abs(val - expected) / expected < 0.15:
+                    continue
+            filtered.append(val)
+
+        if len(filtered) >= 2:
+            result["quantity"] = filtered[-2]
+            result["unitPrice"] = filtered[-1]
+        elif len(filtered) == 1:
+            result["quantity"] = filtered[0]
+    elif len(numeric_vals) == 1:
+        result["quantity"] = numeric_vals[0]
+
+    # ── Quality checks ──
+    desc = result.get("productDescription") or ""
+    code = result.get("productCode") or ""
+    qty = result.get("quantity")
+    price = result.get("unitPrice")
+
+    # Reject lines with no description AND no code
+    if not desc and not code:
+        return None
+
+    # Reject lines with no numeric data (qty and price both None) —
+    # these are likely header/date/address fragments, not products.
+    # Let the legacy parsers have a chance instead.
+    if qty is None and price is None:
+        return None
+
+    # Reject lines with very long descriptions (10+ words) and no
+    # product code — these are likely merged address/header fragments
+    desc_word_count = len(desc.split())
+    if not code and desc_word_count >= 10:
+        return None
+
+    # Reject lines whose tokens (including trailing) contain address/contact
+    # patterns: NIF (9 consecutive digits), phone numbers (3 groups of 3-4
+    # digits), emails, or VAT prefixes (PT, ES, etc.)
+    # Check the raw tokens, not just the cleaned description.
+    raw_tokens_text = ' '.join(tokens)
+    if re.search(r'\b\d{9}\b', raw_tokens_text):
+        return None
+    # Phone: 3 groups of digits (e.g. "253 222 111" or "+351 253 222 111")
+    if re.search(r'(?:\+?\d{2,4}\s+)?\d{3,4}\s+\d{3,4}\s+\d{3,4}\b', raw_tokens_text):
+        return None
+    if re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', raw_tokens_text):
+        return None
+
+    # Reject lines whose description consists entirely of header-keywords
+    header_keywords = {
+        'nota', 'de', 'encomenda', 'fornecedor', 'entrega', 'prevista',
+        'documento', 'data', 'emissao', 'emissão', 'código', 'artigo',
+        'descrição', 'descricao', 'qtd', 'quant', 'quantidade',
+        'preço', 'preco', 'total', 'linha', 'nif', 'tel', 'contacto',
+        'contribuinte', 'página', 'pagina', 'obs',
+    }
+    desc_words = set(desc.lower().split())
+    if desc_words and desc_words.issubset(header_keywords):
+        logger.debug(f"Column parser: rejected header-like line: {desc[:60]}")
+        return None
+
+    # Reject lines that look like URL or file paths
+    if re.match(r'^file\s*:', desc, re.IGNORECASE):
+        return None
+
+    # Reject lines that have a code but description is only a date fragment
+    if code and not desc:
+        return None
+
+    # For lines with only a code and no useful description: reject
+    alpha_clean = re.sub(r'[^A-Za-zÀ-ÿ]', '', desc)
+    if code and len(alpha_clean) < 2 and (qty is None and price is None):
+        return None
+
+    return result
 
 
 def _fallback_parse(ocr_text: str) -> ParsedDocument:
     """
     Fallback parser when LLM is unavailable.
-    Uses regex patterns to extract basic information.
+    Uses regex patterns AND column header detection to extract information.
     """
     import re
 
     doc = ParsedDocument()
     lines = ocr_text.split('\n')
 
+    # ── Detect column structure FIRST ──
+    col_map = _detect_column_structure(lines)
+
+    # ── Supplier name extraction ──
+    # Strategy 1: Look for "FORNECEDOR:" label
     for line in lines:
         m = re.search(r'FORNECEDOR:\s*(.+)', line, re.IGNORECASE)
         if m:
@@ -549,13 +848,43 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
             doc.supplier["name"] = name.strip()
             break
 
+    # Strategy 2: Look for known company suffixes (Lda, SA, etc.)
+    # Find company name by extracting text near the suffix,
+    # removing any digit-heavy prefixes (NIF, phone, zip).
+    if not doc.supplier["name"]:
+        company_suffixes = r'\b(Lda\.?|S\.A\.|S\.?A\b|Unipessoal|LTDA|Ltda\.?|CRL|S\.C\.)'
+        for line in lines:
+            suffix_m = re.search(company_suffixes, line, re.IGNORECASE)
+            if suffix_m:
+                # Take text before the suffix (up to 80 chars)
+                raw_before = line[:suffix_m.start()]
+                # Split on large digit blocks (4+ digits = NIF/phone/zip)
+                # and take the LAST segment — that's the company name
+                segments = re.split(r'\s*\b\d{4,}\b\s*', raw_before)
+                candidate = segments[-1].strip() if segments else raw_before.strip()
+                # Remove leading non-alpha characters
+                candidate = re.sub(r'^[^A-Za-zÀ-ÿ]+', '', candidate)
+                # Trim to last 60 chars if too long
+                if len(candidate) > 60:
+                    candidate = candidate[-60:].lstrip(',. ')
+                if len(candidate) >= 4:
+                    # Include the suffix in the name
+                    full_name = (candidate + ' ' + suffix_m.group(0)).strip()
+                    doc.supplier["name"] = full_name
+                    break
+
+    # Strategy 3: Fallback — look for lines with company suffix anywhere
     if not doc.supplier["name"]:
         for line in lines:
-            m = re.search(r'^([A-Za-zÀ-ÿ\s,]+(?:Lda|SA|S\.A\.|Unipessoal|LTDA|Lda\.))', line)
+            m = re.search(
+                r'([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s&.,]{3,60}?)\s*\b(Lda\.?|S\.A\.|S\.?A\b|Unipessoal|LTDA)\b',
+                line, re.IGNORECASE
+            )
             if m:
                 doc.supplier["name"] = m.group(1).strip()
                 break
 
+    # ── NIF extraction ──
     for line in lines:
         m = re.search(r'NIF:\s*([\d\s]{9,})', line, re.IGNORECASE)
         if m:
@@ -565,95 +894,208 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                 doc.supplier["nif"] = nif_clean[:9]
                 break
 
+    # ── Date extraction ──
+    # Try multiple date patterns: "DATA DA ENCOMENDA:", "Data Emissão:",
+    # "Entrega Prevista:", generic "Data:" followed by date, or plain date patterns
+    date_patterns = [
+        r'DATA\s+DA\s+ENCOMENDA:\s*(\d{2})[/-](\d{2})[/-](\d{4})',
+        r'Entrega\s+Prevista\s*:?\s*(\d{2})[/-](\d{2})[/-](\d{4})',
+        r'Data\s+Emiss[ãa]o\s*:?\s*(\d{2})[/-](\d{2})[/-](\d{4})',
+        r'\bData\b[^:]*:\s*(\d{2})[/-](\d{2})[/-](\d{4})',
+        # Plain date on its own line: "20/05/2025" or "20-05-2025"
+        r'^(\d{2})[/-](\d{2})[/-](\d{4})\s*$',
+    ]
     for line in lines:
-        m = re.search(r'DATA\s+DA\s+ENCOMENDA:\s*(\d{2})[/-](\d{2})[/-](\d{4})', line, re.IGNORECASE)
-        if m:
-            day, month, year = m.group(1), m.group(2), m.group(3)
-            doc.documentDate = f"{year}-{month}-{day}"
+        for pattern in date_patterns:
+            m = re.search(pattern, line, re.IGNORECASE)
+            if m:
+                day, month, year = m.group(1), m.group(2), m.group(3)
+                doc.documentDate = f"{year}-{month}-{day}"
+                break
+        if doc.documentDate:
             break
 
+    # ── Document number extraction ──
+    # Try multiple patterns: "ENCOMENDA Nº", "Documento Nº:", "NE-...", etc.
+    doc_num_patterns = [
+        r'ENCOMENDA\s+N[ºo]\s*([\d/]+)',
+        r'Documento\s+N[ºo]\s*:?\s*([A-Z0-9\-/]+)',
+        r'\bNE[-\s](\d{4}[-\s]?\d+)',
+    ]
     for line in lines:
-        m = re.search(r'ENCOMENDA\s+N[ºo]\s*([\d/]+)', line, re.IGNORECASE)
-        if m:
-            doc.documentNumber = m.group(1).strip()
+        for pattern in doc_num_patterns:
+            m = re.search(pattern, line, re.IGNORECASE)
+            if m:
+                doc.documentNumber = m.group(1).strip()
+                break
+        if doc.documentNumber:
             break
 
-    for line in lines:
+    header_idx = col_map.get('header_line_idx')
+
+    # ── Build a set of header-like keywords for early exclusion ──
+    _HEADER_KEYWORDS = {
+        'nota', 'de', 'encomenda', 'fornecedor', 'entrega', 'prevista',
+        'documento', 'data', 'emissao', 'emissão', 'código', 'codigo', 'artigo',
+        'descrição', 'descricao', 'designação', 'designacao',
+        'qtd', 'quant', 'quantidade', 'qty',
+        'preço', 'preco', 'unitário', 'unitario',
+        'total', 'linha', 'nif', 'tel', 'telefone', 'contacto',
+        'contribuinte', 'página', 'pagina', 'obs', 'rua',
+        'ref', 'referencia', 'referência',
+    }
+    _HEADER_PREFIX_PATTERN = re.compile(
+        r'^(?:NOTA\s+DE|DATA|EMISS[ÃA]O|ENTREGA|PREVISTA|'
+        r'C[ÓO]DIGO|ARTIGO|DESCRI[ÇC][ÃA]O|'
+        r'TOTAL|SUBTOTAL|IVA|EUR|NIF|CONTRIBUINTE|'
+        r'P[ÁA]GINA|OBS|TEL|TELEFONE|CONTACTO|'
+        r'DOCUMENTO|FORNECEDOR|RUA|AV\.|AVENIDA)',
+        re.IGNORECASE
+    )
+    _URL_PATTERN = re.compile(r'^(?:file|http)s?[:/]', re.IGNORECASE)
+    _DATE_ONLY_PATTERN = re.compile(r'^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}[,\s]')
+    _PAGE_NUM_PATTERN = re.compile(r'^\d+\s*/\s*\d+\s*$')
+
+    for idx, line in enumerate(lines):
         line_stripped = line.strip()
         if not line_stripped:
+            continue
+
+        # Skip the header row itself
+        if header_idx is not None and idx == header_idx:
+            continue
+
+        # Skip separator lines (dashes, equals)
+        if re.match(r'^[\s\-_=]{5,}$', line_stripped):
+            continue
+
+        # ── Early exclusion: skip obvious non-product lines ──
+        if _URL_PATTERN.match(line_stripped):
+            continue
+        if _PAGE_NUM_PATTERN.match(line_stripped):
+            continue
+        if _DATE_ONLY_PATTERN.match(line_stripped):
+            continue
+
+        # Lines composed entirely of header keywords are not products
+        words = set(
+            re.sub(r'[^A-Za-zÀ-ÿ0-9]', ' ', line_stripped.lower()).split()
+        )
+        if words and words.issubset(_HEADER_KEYWORDS):
             continue
 
         # ── Try bracket/pipe parser first (handles supplier table format) ──
         bracket_result = _parse_bracket_pipe_line(line_stripped)
         if bracket_result:
             desc = bracket_result.get("productDescription", "")
-            if desc and not re.match(r'^(?:TOTAL|SUBTOTAL|IVA|REF|ARTIGO|COD)', desc, re.IGNORECASE):
+            excluded = r'^(?:TOTAL|SUBTOTAL|IVA|REF|ARTIGO|COD|VALOR\s+TOTAL)'
+            if desc and not re.match(excluded, desc, re.IGNORECASE):
                 doc.lines.append(bracket_result)
                 continue
 
-        line_clean = line.replace('€', '').replace(',', '.').strip()
-
-        code_m = re.match(r'^(\d{2,})\s+', line_clean)
-        if code_m:
-            code = code_m.group(1)
-            rest = line_clean[code_m.end():].strip()
-
-            trailing_match = re.search(r'((?:\d+(?:\.\d+)?(?:\s+|$))+)\s*$', rest)
-            if trailing_match:
-                num_tokens = re.findall(r'\d+(?:\.\d+)?', trailing_match.group(1))
-            else:
-                num_tokens = []
-
-            if len(num_tokens) >= 2:
-                if len(num_tokens) >= 4:
-                    qty_idx = -3
-                    price_idx = -2
-                elif len(num_tokens) >= 3:
-                    try:
-                        second_last = float(num_tokens[-2])
-                        last = float(num_tokens[-1])
-                        if second_last > 0 and last / second_last > 1.5:
-                            qty_idx = -3
-                            price_idx = -2
-                        else:
-                            qty_idx = -3
-                            price_idx = -1
-                    except (ValueError, ZeroDivisionError):
-                        qty_idx = -3
-                        price_idx = -1
-                else:
-                    qty_idx = -2
-                    price_idx = -1
-
-                qty_str = num_tokens[qty_idx]
-                price_str = num_tokens[price_idx]
-
-                desc = rest
-                for tok in reversed(num_tokens):
-                    desc = re.sub(r'\s*' + re.escape(tok) + r'\s*$', '', desc, count=1)
-                desc = desc.strip()
-
-                if desc:
-                    doc.lines.append({
-                        "productCode": code,
-                        "productDescription": _clean_description(desc),
-                        "quantity": _to_float(qty_str),
-                        "unitPrice": _to_float(price_str),
-                    })
+        # ── Try column-structure-based parsing ──
+        if col_map.get('column_count', 0) >= 2:
+            col_result = _parse_data_line_with_columns(line_stripped, col_map)
+            if col_result:
+                desc = col_result.get("productDescription") or ""
+                code = col_result.get("productCode")
+                qty = col_result.get("quantity")
+                price = col_result.get("unitPrice")
+                desc_words = desc.split()
+                tokens_in_line = len(re.findall(r'\S+', line_stripped))
+                # Quality check: reject low-quality column parser results
+                # so legacy parsers get a chance.
+                is_low_quality = (
+                    (code is None and len(desc_words) <= 2 and tokens_in_line >= 5)
+                    or (qty is None and price is None and code is not None and len(desc_words) <= 3)
+                )
+                if desc and not is_low_quality:
+                    doc.lines.append(col_result)
                     continue
 
+        # ── Legacy parsers below (for documents without detectable headers) ──
+        line_clean = line.replace('€', '').replace(',', '.').strip()
+
+        code_m = re.match(r'^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s+', line_clean)
+        if code_m:
+            code = code_m.group(1)
+            # Skip lines where the code portion is a header/address keyword
+            if re.match(
+                r'^(?:NOTA|DATA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[AÃ]O|'
+                r'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|TOTAL|FORNECEDOR|NIF|TEL|'
+                r'CONTRIBUINTE|RUA|AV\.|P[ÁA]GINA|OBS|IVA|EUR)$',
+                code, re.IGNORECASE
+            ):
+                # This is a header/address fragment, not a product — skip
+                pass
+            else:
+                rest = line_clean[code_m.end():].strip()
+
+                trailing_match = re.search(r'((?:\d+(?:\.\d+)?(?:\s+|$))+)\s*$', rest)
+                if trailing_match:
+                    num_tokens = re.findall(r'\d+(?:\.\d+)?', trailing_match.group(1))
+                else:
+                    num_tokens = []
+
+                if len(num_tokens) >= 2:
+                    if len(num_tokens) >= 4:
+                        qty_idx = -3
+                        price_idx = -2
+                    elif len(num_tokens) >= 3:
+                        try:
+                            second_last = float(num_tokens[-2])
+                            last = float(num_tokens[-1])
+                            if second_last > 0 and last / second_last > 1.5:
+                                qty_idx = -3
+                                price_idx = -2
+                            else:
+                                qty_idx = -3
+                                price_idx = -1
+                        except (ValueError, ZeroDivisionError):
+                            qty_idx = -3
+                            price_idx = -1
+                    else:
+                        qty_idx = -2
+                        price_idx = -1
+
+                    qty_str = num_tokens[qty_idx]
+                    price_str = num_tokens[price_idx]
+
+                    desc = rest
+                    for tok in reversed(num_tokens):
+                        desc = re.sub(r'\s*' + re.escape(tok) + r'\s*$', '', desc, count=1)
+                    desc = desc.strip()
+
+                    if desc:
+                        doc.lines.append({
+                            "productCode": code,
+                            "productDescription": _clean_description(desc),
+                            "quantity": _to_float(qty_str),
+                            "unitPrice": _to_float(price_str),
+                        })
+                        continue
+
         m_simple = re.match(
-            r'^(\d{2,})\s+'
+            r'^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s+'
             r'(.+?)\s+'
             r'(\d+(?:\.\d+)?)\s+'
             r'(\d+(?:\.\d+)?)\s*$',
             line_clean
         )
         if m_simple:
+            code = m_simple.group(1)
             desc = m_simple.group(2).strip()
-            if desc and not re.match(r'^(?:TOTAL|SUBTOTAL|IVA)', desc, re.IGNORECASE):
+            # Also reject header-like codes
+            code_is_header = bool(re.match(
+                r'^(?:NOTA|DATA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[AÃ]O|'
+                r'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|TOTAL|FORNECEDOR|NIF|TEL|'
+                r'CONTRIBUINTE|RUA|AV\.|P[ÁA]GINA|OBS|IVA|EUR)$',
+                code, re.IGNORECASE
+            ))
+            excluded = r'^(?:TOTAL|SUBTOTAL|IVA|EUR|NIF|CONTRIBUINTE|DATA|P[AÁ]GINA|OBS|REF|ARTIGO|COD|NOTA|ENCOMENDA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[ÃA]O|FORNECEDOR|TEL|TELEFONE|C[ÓO]DIGO|DESCRI[ÇC][ÃA]O)'
+            if desc and not code_is_header and not re.match(excluded, desc, re.IGNORECASE) and not _HEADER_PREFIX_PATTERN.match(desc):
                 doc.lines.append({
-                    "productCode": m_simple.group(1),
+                    "productCode": code,
                     "productDescription": _clean_description(desc),
                     "quantity": float(m_simple.group(3)),
                     "unitPrice": float(m_simple.group(4)),
@@ -662,7 +1104,7 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
 
         m2 = re.match(
             r'^'
-            r'(\d{2,4})\s*'
+            r'([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s*'
             r'\[?'
             r'(.+?)\s*'
             r'(?:\|\s*)?'
@@ -673,33 +1115,74 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
             line_stripped
         )
         if m2:
+            code = m2.group(1)
             desc = m2.group(2).strip()
             desc = _clean_description(desc)
+            code_is_header = bool(re.match(
+                r'^(?:NOTA|DATA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[AÃ]O|'
+                r'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|TOTAL|FORNECEDOR|NIF|TEL|'
+                r'CONTRIBUINTE|RUA|AV\.|P[ÁA]GINA|OBS|IVA|EUR)$',
+                code, re.IGNORECASE
+            ))
+            excluded = r'^(?:TOTAL|SUBTOTAL|IVA|EUR|NIF|CONTRIBUINTE|DATA|P[AÁ]GINA|OBS|REF|ARTIGO|COD|NOTA|ENCOMENDA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[ÃA]O|FORNECEDOR|TEL|TELEFONE|C[ÓO]DIGO|DESCRI[ÇC][ÃA]O)'
+            if desc and not code_is_header and not re.match(excluded, desc, re.IGNORECASE) and not _HEADER_PREFIX_PATTERN.match(desc):
+                qty_str = m2.group(3).replace(',', '.')
+                price_str = m2.group(4).replace(',', '.')
 
-            qty_str = m2.group(3).replace(',', '.')
-            price_str = m2.group(4).replace(',', '.')
+                doc.lines.append({
+                    "productCode": code,
+                    "productDescription": desc,
+                    "quantity": _to_float(qty_str),
+                    "unitPrice": _to_float(price_str),
+                })
+                continue
 
-            doc.lines.append({
-                "productCode": m2.group(1),
-                "productDescription": desc,
-                "quantity": _to_float(qty_str),
-                "unitPrice": _to_float(price_str),
-            })
-            continue
+        # ── Pattern B2: Description only + trailing numbers (no code prefix) ──
+        # Handles lines like "Arroz Agulha 20 1,15" without a product code
+        no_code_match = re.match(
+            r'^([A-Za-zÀ-ÿ0-9][A-Za-zÀ-ÿ0-9\s\-\.\+]+?)\s+'
+            r'(\d+(?:[.,]\d+)?)\s+'
+            r'(\d+(?:[.,]\d+)?)\s*$',
+            line_stripped
+        )
+        if no_code_match:
+            desc = no_code_match.group(1).strip()
+            desc = _clean_description(desc)
+            qty = _to_float(no_code_match.group(2))
+            price = _to_float(no_code_match.group(3))
+            excluded = r'^(?:TOTAL|SUBTOTAL|IVA|REF|ARTIGO|COD|VALOR\s+TOTAL|DATA|ENCOMENDA|FORNECEDOR|NIF|CONTRIBUINTE|NOTA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[ÃA]O|TEL|TELEFONE|C[ÓO]DIGO|DESCRI[ÇC][ÃA]O)'
+            if desc and not re.match(excluded, desc, re.IGNORECASE) and not _HEADER_PREFIX_PATTERN.match(desc):
+                doc.lines.append({
+                    "productCode": None,
+                    "productDescription": desc,
+                    "quantity": qty,
+                    "unitPrice": price,
+                })
+                continue
 
         m3 = re.match(
-            r'^(\d{2,4})\s+'
+            r'^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s+'
             r'(.+)',
             line_stripped
         )
         if m3:
             desc = m3.group(2).strip()
             desc = _clean_description(desc)
-            # Filter out headers, totals, and lines that look like non-product metadata
-            excluded_patterns = r'^(?:REF|ARTIGO|COD|TOTAL|SUBTOTAL|IVA|EUR|NIF|CONTRIBUINTE|DATA|P[AÁ]GINA|OBS)'
-            if desc and not re.match(excluded_patterns, desc, re.IGNORECASE):
-                # Only add as a line if the description contains meaningful text
-                # (not just isolated numbers or short garbage)
+            code = m3.group(1)
+            excluded_patterns = (
+                r'^(?:REF|ARTIGO|COD|TOTAL|SUBTOTAL|IVA|EUR|NIF|CONTRIBUINTE|'
+                r'DATA|P[AÁ]GINA|OBS|NOTA|ENCOMENDA|ENTREGA|PREVISTA|'
+                r'DOCUMENTO|EMISS[ÃA]O|FORNECEDOR|TEL|TELEFONE|'
+                r'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|RUA|AV\.)'
+            )
+            # Also check the code portion — if it looks like a header keyword, skip
+            code_is_header = bool(re.match(
+                r'^(?:NOTA|DATA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[AÃ]O|'
+                r'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|TOTAL|FORNECEDOR|NIF|TEL|'
+                r'CONTRIBUINTE|RUA|AV\.|P[ÁA]GINA|OBS|IVA|EUR)$',
+                code, re.IGNORECASE
+            ))
+            if desc and not code_is_header and not re.match(excluded_patterns, desc, re.IGNORECASE) and not _HEADER_PREFIX_PATTERN.match(desc):
                 desc_clean = re.sub(r'\W+', '', desc)
                 if len(desc_clean) >= 3:
                     doc.lines.append({
@@ -717,8 +1200,31 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
         m = re.search(r'TOTAL\s+COM\s+IVA\s*([\d.]+)', line_clean, re.IGNORECASE)
         if m:
             doc.totalGross = float(m.group(1))
+        m = re.search(r'Total\s+L[ií]quido\s*:?\s*([\d.,]+)', line_clean, re.IGNORECASE)
+        if m:
+            doc.totalNet = _to_float(m.group(1))
 
     return doc
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count estimate (~4 chars per token)."""
+    return max(1, len(text) // 4)
+
+
+def _truncate_ocr_text(ocr_text: str, max_chars: int) -> str:
+    """Truncate OCR text to fit within a character budget, preserving line structure."""
+    if len(ocr_text) <= max_chars:
+        return ocr_text
+    truncated = ocr_text[:max_chars]
+    last_newline = truncated.rfind('\n')
+    if last_newline > max_chars * 0.8:
+        truncated = truncated[:last_newline]
+    logger.warning(
+        f"OCR text truncated from {len(ocr_text)} to {len(truncated)} chars "
+        f"({_estimate_tokens(ocr_text)} to {_estimate_tokens(truncated)} est. tokens)"
+    )
+    return truncated
 
 
 def _clean_nif(nif_value: str | None) -> str | None:

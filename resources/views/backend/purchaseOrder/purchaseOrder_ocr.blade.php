@@ -358,7 +358,7 @@
                 const price = parseFloat(line.unitPrice) || 0;
                 const total = (qty * price).toFixed(2);
                 const code = line.productCode || '-';
-                const desc = line.description || line.productDescription || '-';
+                const desc = line.description || line.productDescription || '<span class="text-muted fst-italic">(sem descrição)</span>';
                 const badgeClass = line.found ? 'bg-success' : 'bg-warning text-dark';
                 const badgeText = line.found ? '' : 'Novo';
 
@@ -390,18 +390,18 @@
 
         // ── Vista de edição (oculta inicialmente) ──
         let editHTML = `
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h6 class="mb-0">Editar Dados Extraídos</h6>
-                <div>
-                    <button type="button" id="save-ocr-btn" class="btn btn-success btn-sm">
-                        <i class="fas fa-save"></i> Guardar
-                    </button>
-                    <button type="button" id="cancel-edit-btn" class="btn btn-outline-secondary btn-sm">
-                        <i class="fas fa-times"></i> Cancelar
-                    </button>
-                </div>
-            </div>
             <div id="ocr-edit-view" style="display: none;">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h6 class="mb-0">Editar Dados Extraídos</h6>
+                    <div>
+                        <button type="button" id="save-ocr-btn" class="btn btn-success btn-sm">
+                            <i class="fas fa-save"></i> Guardar
+                        </button>
+                        <button type="button" id="cancel-edit-btn" class="btn btn-outline-secondary btn-sm">
+                            <i class="fas fa-times"></i> Cancelar
+                        </button>
+                    </div>
+                </div>
                 <div class="row g-2 mb-3">
                     <div class="col-md-6">
                         <label class="form-label small mb-0">Fornecedor</label>

@@ -721,13 +721,26 @@ class PurchaseOrderController extends Controller
         $file = $request->file('document');
 
         // ── Passo 1: Tentar o OCR Service (Python microservice) ──────────
+        $ocrServiceFailed = false;
+        $result = null;
+
         try {
             $ocrService = app(OcrService::class);
             $result = $ocrService->analyzeDocument($file);
+        } catch (\Exception $e) {
+            Log::info('[PO-OCR] Serviço OCR não disponível, a usar fallback Tesseract.', [
+                'requestId' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+            $ocrServiceFailed = true;
+        }
 
-            if ($result['success']) {
+        // Se o serviço OCR respondeu com sucesso, processa os dados
+        if (!$ocrServiceFailed && ($result['success'] ?? false)) {
+            try {
                 $parsed = $result['data']['parsed'] ?? [];
                 $rawText = $result['data']['raw_text'] ?? '';
+                $assembledText = $result['data']['ocr_assembled'] ?? $rawText;
 
                 Log::info('[PO-OCR] Serviço OCR usado com sucesso.', [
                     'requestId' => $requestId,
@@ -735,35 +748,77 @@ class PurchaseOrderController extends Controller
                     'lines' => count($parsed['lines'] ?? []),
                 ]);
 
+                // ── DIAGNOSTIC: Log raw OCR text and assembled text ──
+                Log::info('[PO-OCR] DIAGNOSTIC rawText (' . strlen($rawText) . ' chars): ' . substr($rawText, 0, 2000));
+                Log::info('[PO-OCR] DIAGNOSTIC assembledText (' . strlen($assembledText) . ' chars): ' . substr($assembledText, 0, 2000));
+                // Log each parsed line from the LLM/Python parser
+                foreach (($parsed['lines'] ?? []) as $i => $line) {
+                    Log::info("[PO-OCR] DIAGNOSTIC Python parsed line[$i]", [
+                        'productCode' => $line['productCode'] ?? null,
+                        'productDescription' => $line['productDescription'] ?? null,
+                        'quantity' => $line['quantity'] ?? null,
+                        'unitPrice' => $line['unitPrice'] ?? null,
+                    ]);
+                }
+
                 // Converter formato do LLM para o formato esperado pelo enriquecimento
                 $convertedData = $this->convertLLMFormatToInternal($parsed);
 
                 // Enriquece com dados da base de dados
                 $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($convertedData, $requestId);
 
-                // Verifica se as linhas têm preços válidos (> 0).
-                // Se o LLM não extraiu preços, tenta o parser regex PHP
+                // Verifica se as linhas têm dados válidos (preços > 0 e descrições não vazias).
+                // Se o LLM falhou na extração, tenta o parser regex PHP como fallback.
                 $hasPrices = collect($enrichedData['lines'] ?? [])
                     ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
+                $hasDescriptions = collect($enrichedData['lines'] ?? [])
+                    ->contains(fn($line) => !empty(trim($line['description'] ?? '')));
+                $hasLines = count($enrichedData['lines'] ?? []) > 0;
 
-                $usePhpFallback = !$hasPrices && !empty($rawText);
+                $usePhpFallback = ($hasLines && (!$hasPrices || !$hasDescriptions)) && (!empty($rawText) || !empty($assembledText));
 
                 if ($usePhpFallback) {
-                    Log::info('[PO-OCR] LLM não extraiu preços, a tentar parser PHP.', [
+                    $reason = !$hasPrices ? 'sem preços' : 'sem descrições';
+                    Log::info("[PO-OCR] LLM não extraiu dados válidos ({$reason}), a tentar parser PHP.", [
                         'requestId' => $requestId,
                         'rawTextLen' => strlen($rawText),
+                        'assembledTextLen' => strlen($assembledText),
                     ]);
 
-                    $phpParsedData = $this->parsePurchaseOrderDocument($rawText, $requestId);
+                    // Prefer assembled lines text over raw text (it groups OCR
+                    // detections into logical lines, making table parsing possible)
+                    $textForPhpParser = !empty($assembledText) ? $assembledText : $rawText;
+                    $phpParsedData = $this->parsePurchaseOrderDocument($textForPhpParser, $requestId);
+
+                    // ── DIAGNOSTIC: Log PHP parser output lines ──
+                    Log::info("[PO-OCR] DIAGNOSTIC PHP parser result: supplier=" . json_encode($phpParsedData['supplier'] ?? []));
+                    foreach (($phpParsedData['lines'] ?? []) as $i => $line) {
+                        Log::info("[PO-OCR] DIAGNOSTIC PHP parsed line[$i]", [
+                            'codigo' => $line['codigo'] ?? null,
+                            'descricao' => $line['descricao'] ?? null,
+                            'quantidade' => $line['quantidade'] ?? null,
+                            'precoUnitario' => $line['precoUnitario'] ?? null,
+                        ]);
+                    }
+
                     $phpEnrichedData = $this->enrichPurchaseOrderDataWithDatabase($phpParsedData, $requestId);
 
                     $phpHasPrices = collect($phpEnrichedData['lines'] ?? [])
                         ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
+                    $phpHasDescriptions = collect($phpEnrichedData['lines'] ?? [])
+                        ->contains(fn($line) => !empty(trim($line['description'] ?? '')));
+                    $phpLineCount = count($phpEnrichedData['lines'] ?? []);
+                    $llmLineCount = count($enrichedData['lines'] ?? []);
 
-                    if ($phpHasPrices) {
-                        Log::info('[PO-OCR] Parser PHP extraiu preços, a usar resultado.', [
+                    $phpIsBetter = $phpLineCount > $llmLineCount
+                        || ($phpHasPrices && !$hasPrices)
+                        || ($phpHasDescriptions && !$hasDescriptions);
+
+                    if ($phpIsBetter && $phpLineCount > 0) {
+                        Log::info('[PO-OCR] Parser PHP produziu melhor resultado, a usar.', [
                             'requestId' => $requestId,
-                            'lines' => count($phpEnrichedData['lines']),
+                            'phpLines' => $phpLineCount,
+                            'llmLines' => $llmLineCount,
                         ]);
 
                         session()->flash('ocr_purchase_order_data', $phpEnrichedData);
@@ -790,17 +845,28 @@ class PurchaseOrderController extends Controller
                     'enriched' => $enrichedData,
                     'ocr_service' => 'python_microservice',
                 ]);
-            }
+            } catch (\Exception $e) {
+                // Erro durante o processamento/enriquecimento dos dados —
+                // NÃO cair para o Tesseract; o serviço OCR funcionou mas o
+                // processamento dos dados falhou (ex: erro de BD).
+                Log::error('[PO-OCR] Erro ao processar dados extraídos pelo OCR Service.', [
+                    'requestId' => $requestId,
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                ]);
 
-            // Serviço disponível mas falhou — log do erro
+                return response()->json([
+                    'success' => false,
+                    'error' => 'Erro ao processar os dados extraídos do documento: ' . $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Serviço disponível mas devolveu erro
+        if (!$ocrServiceFailed && !($result['success'] ?? false)) {
             Log::warning('[PO-OCR] Serviço OCR disponível mas falhou, a usar fallback Tesseract.', [
                 'requestId' => $requestId,
                 'error' => $result['error'] ?? 'unknown',
-            ]);
-        } catch (\Exception $e) {
-            Log::info('[PO-OCR] Serviço OCR não disponível, a usar fallback Tesseract.', [
-                'requestId' => $requestId,
-                'error' => $e->getMessage(),
             ]);
         }
 
@@ -854,10 +920,10 @@ class PurchaseOrderController extends Controller
      * Converte o formato do LLM (OCR Service) para o formato interno.
      *
      * O LLM devolve algo como:
-     *   { supplier: {name, nif, address}, lines: [{productCode, productDescription, quantity, unitPrice}] }
+     *   { supplier: {name, nif, address}, lines: [{productCode, productDescription, quantity, unitPrice, unit}] }
      *
      * O formato interno espera:
-     *   { supplier: {nome, nif}, lines: [{codigo, descricao, quantidade, precoUnitario}] }
+     *   { supplier: {nome, nif}, lines: [{codigo, descricao, quantidade, precoUnitario, unidade}] }
      */
     private function convertLLMFormatToInternal(array $parsed): array
     {
@@ -875,9 +941,10 @@ class PurchaseOrderController extends Controller
             'lines' => array_map(function ($line) {
                 return [
                     'codigo' => $line['productCode'] ?? '',
-                    'descricao' => $line['productDescription'] ?? '',
+                    'descricao' => $this->sanitizeDescription((string) ($line['productDescription'] ?? '')),
                     'quantidade' => $line['quantity'] ?? 1,
                     'precoUnitario' => $line['unitPrice'] ?? 0,
+                    'unidade' => $line['unit'] ?? null,
                 ];
             }, $lines),
             'documentDate' => $parsed['documentDate'] ?? null,
@@ -961,7 +1028,7 @@ class PurchaseOrderController extends Controller
     /**
      * Procura ou cria um artigo com base nos dados extraídos do OCR.
      *
-     * @param  array{codigo?:string,descricao?:string,quantidade?:float,precoUnitario?:float}  $parsedLine
+     * @param  array{codigo?:string,descricao?:string,quantidade?:float,precoUnitario?:float,unidade?:string}  $parsedLine
      * @return array{found:bool,model:Product}
      */
     private function findOrCreateProductFromOcr(array $parsedLine): array
@@ -970,6 +1037,7 @@ class PurchaseOrderController extends Controller
         $descricao = $this->sanitizeDescription($parsedLine['descricao'] ?? '');
         $quantidade = $this->normalizeNumber($parsedLine['quantidade'] ?? 0);
         $precoUnitario = $this->normalizeNumber($parsedLine['precoUnitario'] ?? 0);
+        $unidadeExtraida = trim((string) ($parsedLine['unidade'] ?? ''));
 
         // 1. Tentar encontrar por código
         if (!empty($codigo)) {
@@ -1016,7 +1084,7 @@ class PurchaseOrderController extends Controller
         }
 
         $family = $this->ensureDefaultFamily();
-        $unit = $this->ensureDefaultUnit();
+        $unit = $this->resolveUnitFromOcr($unidadeExtraida);
         $taxRateCode = $this->resolveTaxRateFromOcr(null);
         $newCode = $this->generateProductCode();
 
@@ -1090,6 +1158,36 @@ class PurchaseOrderController extends Controller
         }
 
         return $defaultUnit;
+    }
+
+    /**
+     * Resolve a unidade extraída do OCR para uma unidade válida na BD.
+     *
+     * Se a unidade extraída for válida (UN, CX, KG, etc.) e existir na BD, usa-a.
+     * Caso contrário, cria-a se necessário ou devolve o fallback (UN).
+     */
+    private function resolveUnitFromOcr(string $ocrUnit): string
+    {
+        $ocrUnit = strtoupper(trim($ocrUnit));
+
+        if (empty($ocrUnit)) {
+            return $this->ensureDefaultUnit();
+        }
+
+        $exists = UnitMeasure::where('unit', $ocrUnit)->first();
+        if ($exists) {
+            return $ocrUnit;
+        }
+
+        // Tenta criar a unidade extraída se for uma abreviatura comum
+        $knownUnits = ['UN', 'CX', 'KG', 'G', 'L', 'LT', 'ML', 'M', 'MM', 'CM', 'PCT', 'SAC', 'MOLHO', 'DOSE', 'HRS', 'HR'];
+        if (in_array($ocrUnit, $knownUnits, true)) {
+            UnitMeasure::create(['unit' => $ocrUnit]);
+            Log::info('[PO-OCR] Unidade criada automaticamente (extraída do OCR).', ['unit' => $ocrUnit]);
+            return $ocrUnit;
+        }
+
+        return $this->ensureDefaultUnit();
     }
 
     /**
@@ -1175,10 +1273,27 @@ class PurchaseOrderController extends Controller
                 $supplier['dataEncomenda'] = "{$m[3]}-{$m[2]}-{$m[1]}";
                 break;
             }
+            if (preg_match('/Data\s+Emiss[ãa]o\s*:?\s*(\d{2})[\/\-](\d{2})[\/\-](\d{4})/i', $line, $m)) {
+                $supplier['dataEncomenda'] = "{$m[3]}-{$m[2]}-{$m[1]}";
+                break;
+            }
+            if (preg_match('/Entrega\s+Prevista\s*:?\s*(\d{2})[\/\-](\d{2})[\/\-](\d{4})/i', $line, $m)) {
+                // This is the delivery date — store it separately and also as the document date
+                $supplier['dataEncomenda'] = "{$m[3]}-{$m[2]}-{$m[1]}";
+                break;
+            }
         }
 
         // --- Nome do fornecedor: primeiras linhas não vazias que não pareçam cabecalho ---
-        $headerKeywords = ['fatura', 'invoice', 'recibo', 'receipt', 'encomenda', 'data', 'n[oº]'];
+        $headerKeywords = [
+            'fatura', 'invoice', 'recibo', 'receipt', 'encomenda', 'data',
+            'n[oº]', 'nota', 'fornecedor', 'cliente', 'documento', 'entrega',
+            'prevista', 'emiss', 'c[oó]digo', 'artigo', 'descri[çc]',
+            'qtd', 'quant', 'pre[çc]o', 'total', 'iva', 'taxa',
+            'tel', 'telefone', 'contacto', 'p[áa]gina',
+        ];
+        $supplierNameCandidate = null;
+
         foreach ($lines as $line) {
             $trimmed = trim($line);
             if (empty($trimmed) || mb_strlen($trimmed) < 3) {
@@ -1194,6 +1309,18 @@ class PurchaseOrderController extends Controller
             if ($isHeader) {
                 continue;
             }
+
+            // Skip date patterns (e.g., "24/05/26, 10:10", "24/05/2026")
+            if (preg_match('#^\d{1,2}\s*[/\-]\s*\d{1,2}\s*[/\-]\s*\d{2,4}#', $trimmed)) {
+                continue;
+            }
+
+            // Skip single-word labels (likely headers, not company names)
+            $wordCount = count(preg_split('/\s+/', $trimmed));
+            if ($wordCount === 1 && mb_strlen($trimmed) <= 15) {
+                continue;
+            }
+
             // Se parece um endereço, guardar como morada
             if (preg_match('/^(?:Rua|Av\.|Avenida|Travessa|Largo|Praça|Estrada)/i', $trimmed)) {
                 if (empty($supplier['morada'])) {
@@ -1205,8 +1332,22 @@ class PurchaseOrderController extends Controller
             if (preg_match('/^\d{9}$/', $trimmed)) {
                 continue;
             }
-            $supplier['nome'] = $trimmed;
-            break;
+
+            // Store first reasonable candidate
+            if ($supplierNameCandidate === null) {
+                $supplierNameCandidate = $trimmed;
+            }
+
+            // If line has a company suffix (Lda, S.A., etc.), use it immediately
+            if (preg_match('/\b(Lda\.?|S\.A\.|S\.?A\b|Unipessoal|LTDA|Ltda\.?|CRL)\b/i', $trimmed)) {
+                $supplier['nome'] = $trimmed;
+                break;
+            }
+        }
+
+        // Fallback: use first reasonable candidate if no company-suffix line found
+        if (empty($supplier['nome']) && $supplierNameCandidate !== null) {
+            $supplier['nome'] = $supplierNameCandidate;
         }
 
         Log::info('[PO-OCR] Documento interpretado.', [
@@ -1225,135 +1366,70 @@ class PurchaseOrderController extends Controller
     /**
      * Extrai linhas tabulares (artigos) a partir do texto OCR.
      *
-     * Procura por padrões como:
-     *   - Código + Descrição + Quantidade + Preço
-     *   - Descrição + Quantidade + Preço
-     *   - Linhas com formato de colchetes/pipes (formatos de tabela de fornecedor)
-    /**
-     * Tenta extrair uma linha de artigo no formato colchetes/pipes de tabela de fornecedor.
+     * Agora com deteção de cabeçalhos de colunas — procura por uma linha
+     * de cabeçalho com nomes de colunas conhecidos e usa essa estrutura
+     * para fazer o parsing das linhas de dados.
      *
-     * Formatos suportados:
-     *   "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
-     *   "0344 [Tomate Chucha Amad. 25KG | 25[KG| 1,85] 6% | 46,25|"
-     *   "0551 Salsa Frisada Molho 20] UN 6%"
-     *
-     * @return array|null Linha estruturada ou null se não reconhecer o formato
+     * Estratégia:
+     *   1. Deteta cabeçalhos (Ref., Descrição, Qtd, Preço, Valor, etc.)
+     *   2. Para cada linha de dados, distribui os tokens pelas colunas
+     *   3. Fallback para os parsers legados se não houver cabeçalhos
      */
-    private function tryParseBracketPipeLine(string $line): ?array
-    {
-        $stripped = trim($line);
-
-        if (!preg_match('/^(\d{2,4})\s+/u', $stripped, $codeMatch)) {
-            return null;
-        }
-        $code = $codeMatch[1];
-        $rest = trim(substr($stripped, strlen($codeMatch[0])));
-
-        $hasPipe = strpos($rest, '|') !== false;
-        $hasBracketClose = strpos($rest, ']') !== false;
-
-        if (!$hasPipe && !$hasBracketClose) {
-            return null;
-        }
-
-        if ($hasPipe) {
-            $pipePos = strpos($rest, '|');
-            $descRaw = trim(substr($rest, 0, $pipePos));
-            $dataRaw = trim(substr($rest, $pipePos + 1));
-        } else {
-            // Sem pipe: procura padrão "DESCRIÇÃO 20] UN 6%"
-            if (preg_match('/^(.+?)\s+(\d+)\s*\]/u', $rest, $bracketMatch)) {
-                $descRaw = $bracketMatch[1];
-                $dataRaw = substr($rest, strlen($bracketMatch[0]));
-            } else {
-                return null;
-            }
-        }
-
-        // Limpa a descrição
-        $desc = ltrim($descRaw, '[');
-        $desc = rtrim($desc);
-        $desc = $this->sanitizeDescription($desc);
-        if (empty($desc)) {
-            return null;
-        }
-
-        // Extrai números da parte de dados (quantidade + preço)
-        // Remove ruído: unidades [Cx], [KG], [UN], parênteses, pipes, brackets
-        $dataClean = preg_replace('/\[[A-Za-z|]+\]?/u', ' ', $dataRaw);
-        $dataClean = str_replace([']', '|', ')'], ' ', $dataClean);
-        preg_match_all('/\d+(?:[.,]\d+)?/u', $dataClean, $numberMatches);
-        $numbersRaw = $numberMatches[0] ?? [];
-
-        if (count($numbersRaw) < 2) {
-            if (count($numbersRaw) === 1) {
-                return [
-                    'codigo' => $code,
-                    'descricao' => $desc,
-                    'quantidade' => $this->normalizeNumber($numbersRaw[0]),
-                    'precoUnitario' => 0,
-                ];
-            }
-            return null;
-        }
-
-        // Converte números e filtra taxas de IVA e totais
-        $numbers = array_map(fn($n) => $this->normalizeNumber($n), $numbersRaw);
-        $vatRates = [6.0, 13.0, 23.0];
-
-        $filtered = [];
-        foreach ($numbers as $n) {
-            // Pula taxas de IVA conhecidas (apenas se já tivermos pelo menos a quantidade)
-            if (in_array($n, $vatRates, true) && count($filtered) >= 1) {
-                continue;
-            }
-            // Pula totais (número aproximadamente igual a qtd * preço)
-            if (count($filtered) >= 2 && ($filtered[0] ?? 0) > 0 && ($filtered[1] ?? 0) > 0) {
-                $expectedTotal = $filtered[0] * $filtered[1];
-                if ($expectedTotal > 0 && abs($n - $expectedTotal) / $expectedTotal < 0.15) {
-                    continue;
-                }
-            }
-            $filtered[] = $n;
-        }
-
-        $qty = $filtered[0] ?? $this->normalizeNumber($numbersRaw[0]);
-        $priceCandidate = $filtered[1] ?? null;
-        // Se o segundo número for uma taxa de IVA, não o usamos como preço
-        if ($priceCandidate !== null && in_array($priceCandidate, $vatRates, true)) {
-            $priceCandidate = null;
-        }
-        $price = $priceCandidate ?? (count($numbersRaw) > 1 ? $this->normalizeNumber($numbersRaw[1]) : 0);
-
-        return [
-            'codigo' => $code,
-            'descricao' => $desc,
-            'quantidade' => $qty,
-            'precoUnitario' => $price,
-        ];
-    }
-
     private function extractPOTabularLines(string $text): array
     {
         $lines = explode("\n", $text);
         $results = [];
-        $currentDescription = '';
 
-        foreach ($lines as $raw) {
+        // ── Passo 0: Detetar cabeçalhos de colunas ──
+        $columnMap = $this->detectColumnHeaders($lines);
+        $headerIdx = $columnMap['headerLineIdx'] ?? null;
+        $hasColumnStruct = ($columnMap['columnCount'] ?? 0) >= 2;
+
+        foreach ($lines as $idx => $raw) {
             $line = trim($raw);
             if (empty($line)) {
                 continue;
             }
 
-            // ── Passo 0: Tenta o parser dedicado de colchetes/pipes ──
-            $bracketResult = $this->tryParseBracketPipeLine($line);
-            if ($bracketResult !== null && !empty($bracketResult['descricao'])) {
-                $results[] = $bracketResult;
-                $currentDescription = '';
+            // Saltar linha de cabeçalho e separadores
+            if ($headerIdx !== null && $idx === $headerIdx) {
+                continue;
+            }
+            if (preg_match('/^[\s\-_=]{5,}$/u', $line)) {
                 continue;
             }
 
-            // ── Passo 2: Padrão com números no fim da linha ──
+            // ── Filtro precoce: saltar linhas obviamente não-produto ──
+            if ($this->isLineExcluded($line)) {
+                continue;
+            }
+
+            // ── Passo 1: Tenta o parser dedicado de colchetes/pipes ──
+            $bracketResult = $this->tryParseBracketPipeLine($line);
+            if ($bracketResult !== null && !empty($bracketResult['descricao'])) {
+                $results[] = $bracketResult;
+                continue;
+            }
+
+            // ── Passo 2: Tenta parser baseado em cabeçalhos detetados ──
+            if ($hasColumnStruct) {
+                $colResult = $this->parseDataLineWithColumns($line, $columnMap);
+                if ($colResult !== null) {
+                    $desc = $colResult['descricao'] ?? '';
+                    $code = $colResult['codigo'] ?? '';
+                    $descWords = count(array_filter(explode(' ', $desc)));
+                    $tokenCount = count(preg_split('/\s+/', $line, -1, PREG_SPLIT_NO_EMPTY));
+                    // Quality check: reject low-quality column parser results
+                    // so legacy parsers get a chance (handles alphanumeric codes, etc.)
+                    $isLowQuality = empty($code) && $descWords <= 2 && $tokenCount >= 5;
+                    if (!empty($colResult['descricao']) && !$isLowQuality) {
+                        $results[] = $colResult;
+                        continue;
+                    }
+                }
+            }
+
+            // ── Passo 3: Padrão com números no fim da linha ──
             // Ex: "ART-001 Parafuso Inox M8x20 10 2,50"
             // Ex: "1001 Arroz Agulha Cacarola kg 20 20 1,15"
             // Ex: "Parafuso Inox M8x20 10 x 2,50"
@@ -1421,18 +1497,376 @@ class PurchaseOrderController extends Controller
                         'quantidade' => $this->normalizeNumber($qtyStr),
                         'precoUnitario' => $this->normalizeNumber($priceStr),
                     ];
-                    $currentDescription = '';
                     continue;
                 }
             }
 
-            // ── Passo 3: Acumula descrição para linhas multi-linha ──
-            if (preg_match('/^[\s\S]{3,60}$/u', $line) && !$this->isLineExcluded($line)) {
-                $currentDescription .= ' ' . $line;
+            // ── Passo 4: Acumula descrição para linhas multi-linha ──
+            // (apenas se não tiver estrutura de colunas detetada)
+            if (!$hasColumnStruct && preg_match('/^[\s\S]{3,60}$/u', $line) && !$this->isLineExcluded($line)) {
+                // Já não usamos currentDescription — descartamos linhas sem parse completo
             }
         }
 
+        // ── Pós-processamento: filtrar linhas duvidosas ──
+        $results = array_values(array_filter($results, function ($line) {
+            $desc = $line['descricao'] ?? '';
+            // Remove linhas com descrições que são apenas vírgulas, pontos ou artefactos
+            $descClean = trim(preg_replace('/[,\s.\[\]|()\-]+/u', '', $desc));
+            return mb_strlen($descClean) >= 3;
+        }));
+
         return $results;
+    }
+
+    /**
+     * Tenta extrair uma linha de artigo no formato colchetes/pipes de tabela de fornecedor.
+     *
+     * Formatos suportados:
+     *   "0122 [Batata Monalisa Sac 10kg | 5[Cx] 8,60] 6% | 42,50)"
+     *   "0344 [Tomate Chucha Amad. 25KG | 25[KG| 1,85] 6% | 46,25|"
+     *   "0551 Salsa Frisada Molho 20] UN 6%"
+     *
+     * @return array|null Linha estruturada ou null se não reconhecer o formato
+     */
+    private function tryParseBracketPipeLine(string $line): ?array
+    {
+        $stripped = trim($line);
+
+        if (!preg_match('/^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s+/u', $stripped, $codeMatch)) {
+            return null;
+        }
+        $code = $codeMatch[1];
+        $rest = trim(substr($stripped, strlen($codeMatch[0])));
+
+        $hasPipe = strpos($rest, '|') !== false;
+        $hasBracketClose = strpos($rest, ']') !== false;
+
+        if (!$hasPipe && !$hasBracketClose) {
+            return null;
+        }
+
+        if ($hasPipe) {
+            $pipePos = strpos($rest, '|');
+            $descRaw = trim(substr($rest, 0, $pipePos));
+            $dataRaw = trim(substr($rest, $pipePos + 1));
+        } else {
+            if (preg_match('/^(.+?)\s+(\d+)\s*\]/u', $rest, $bracketMatch)) {
+                $descRaw = $bracketMatch[1];
+                $dataRaw = substr($rest, strlen($bracketMatch[0]));
+            } else {
+                return null;
+            }
+        }
+
+        $desc = ltrim($descRaw, '[');
+        $desc = rtrim($desc);
+        $desc = $this->sanitizeDescription($desc);
+        if (empty($desc)) {
+            return null;
+        }
+
+        $dataClean = preg_replace('/\[[A-Za-z|]+\]?/u', ' ', $dataRaw);
+        $dataClean = str_replace([']', '|', ')'], ' ', $dataClean);
+        preg_match_all('/\d+(?:[.,]\d+)?/u', $dataClean, $numberMatches);
+        $numbersRaw = $numberMatches[0] ?? [];
+
+        if (count($numbersRaw) < 2) {
+            if (count($numbersRaw) === 1) {
+                return [
+                    'codigo' => $code,
+                    'descricao' => $desc,
+                    'quantidade' => $this->normalizeNumber($numbersRaw[0]),
+                    'precoUnitario' => 0,
+                ];
+            }
+            return null;
+        }
+
+        $numbers = array_map(fn($n) => $this->normalizeNumber($n), $numbersRaw);
+        $vatRates = [6.0, 13.0, 23.0];
+
+        $filtered = [];
+        foreach ($numbers as $n) {
+            if (in_array($n, $vatRates, true) && count($filtered) >= 1) {
+                continue;
+            }
+            if (count($filtered) >= 2 && ($filtered[0] ?? 0) > 0 && ($filtered[1] ?? 0) > 0) {
+                $expectedTotal = $filtered[0] * $filtered[1];
+                if ($expectedTotal > 0 && abs($n - $expectedTotal) / $expectedTotal < 0.15) {
+                    continue;
+                }
+            }
+            $filtered[] = $n;
+        }
+
+        $qty = $filtered[0] ?? $this->normalizeNumber($numbersRaw[0]);
+        $priceCandidate = $filtered[1] ?? null;
+        if ($priceCandidate !== null && in_array($priceCandidate, $vatRates, true)) {
+            $priceCandidate = null;
+        }
+        $price = $priceCandidate ?? (count($numbersRaw) > 1 ? $this->normalizeNumber($numbersRaw[1]) : 0);
+
+        return [
+            'codigo' => $code,
+            'descricao' => $desc,
+            'quantidade' => $qty,
+            'precoUnitario' => $price,
+        ];
+    }
+
+    /**
+     * Deteta uma linha de cabeçalho de colunas no texto OCR.
+     *
+     * Procura por padrões como:
+     *   "Ref.  Designação  Quant.  Pr. Unit.  Valor"
+     *   "Cód.  Descrição   Qtd Enc  Qtd Ent  Preço  Total"
+     *
+     * @param  string[]  $lines
+     * @return array{codigoCol:int|null, descricaoCol:int|null, quantidadeCol:int|null, precoUnitarioCol:int|null, totalCol:int|null, ivaCol:int|null, unidadeCol:int|null, columnCount:int, headerLineIdx:int|null}
+     */
+    private function detectColumnHeaders(array $lines): array
+    {
+        $columnDefs = [
+            'codigo' => [
+                '/\bRef\.?\b/i', '/\bReferencia\b/i', '/\bC[oó]d\.?\b/i',
+                '/\bC[oó]digo\b/i', '/\bCod\.?\b/i', '/\bArt\.?\b/i',
+                '/\bArtigo\b/i', '/\bRef\b/i',
+            ],
+            'descricao' => [
+                '/\bDescri[cç][aã]o\b/i', '/\bDesigna[cç][aã]o\b/i',
+                '/\bArtigo\b/i', '/\bProduto\b/i', '/\bDesc\.?\b/i',
+                '/\bDesign\.?\b/i',
+            ],
+            'quantidade' => [
+                '/\bQtd\.?\s*Enc/i', '/\bQuant\.?\s*Enc/i', '/\bQtd\.?\b/i',
+                '/\bQuant\.?\b/i', '/\bQuantidade\b/i', '/\bQty\b/i',
+                '/\bQtd\b/i', '/\bUnid\.?\b/i', '/\bUn\.?\b/i',
+                '/\bUnidades?\b/i',
+            ],
+            'precoUnitario' => [
+                '/\bPr\.?\s*Unit\.?\b/i', '/\bPre[cç]o\s*Unit\.?\b/i',
+                '/\bP\.?\s*Unit\.?\b/i', '/\bValor\s*Unit\.?\b/i',
+                '/\bPre[cç]o\b/i', '/\bPr\.?\b/i',
+            ],
+            'total' => [
+                '/\bTotal\b/i', '/\bValor\b/i', '/\bImport\.?\b/i',
+                '/\bImport[aâ]ncia\b/i', '/\bL[ií]quido\b/i',
+            ],
+            'iva' => [
+                '/\bIVA\b/i', '/\bTaxa\b/i', '/\bIVA\s*%/i', '/\b%\s*IVA/i',
+            ],
+            'unidade' => [
+                '/\bUn\.?\b/i', '/\bUN\b/i', '/\bUnidade\b/i', '/\bMedida\b/i',
+            ],
+        ];
+
+        $separatorPattern = '/^[\s\-_=]{5,}$/u';
+
+        foreach ($lines as $idx => $line) {
+            $stripped = trim($line);
+            if (empty($stripped)) {
+                continue;
+            }
+            if (preg_match($separatorPattern, $stripped)) {
+                continue;
+            }
+            // Pula linhas com muitos números (provavelmente dados, não cabeçalho)
+            $digitCount = preg_match_all('/\d/', $stripped);
+            $totalLen = mb_strlen($stripped) ?: 1;
+            if ($digitCount / $totalLen > 0.3) {
+                continue;
+            }
+
+            $foundColumns = [];
+            foreach ($columnDefs as $key => $patterns) {
+                foreach ($patterns as $pattern) {
+                    if (preg_match($pattern, $stripped, $m, PREG_OFFSET_CAPTURE)) {
+                        $pos = $m[0][1];
+                        // Evitar sobreposição com colunas já encontradas
+                        $overlap = false;
+                        foreach ($foundColumns as $existing) {
+                            $existingEnd = $existing['position'] + mb_strlen($existing['match']);
+                            $newEnd = $pos + mb_strlen($m[0][0]);
+                            if ($pos < $existingEnd && $newEnd > $existing['position']) {
+                                $overlap = true;
+                                break;
+                            }
+                        }
+                        if (!$overlap) {
+                            $foundColumns[$key] = [
+                                'position' => $pos,
+                                'match' => $m[0][0],
+                            ];
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Precisamos de pelo menos 2 colunas reconhecidas
+            if (count($foundColumns) >= 2) {
+                // Ordena por posição
+                uasort($foundColumns, fn($a, $b) => $a['position'] <=> $b['position']);
+                $sortedKeys = array_keys($foundColumns);
+
+                $result = [
+                    'codigoCol' => array_search('codigo', $sortedKeys, true),
+                    'descricaoCol' => array_search('descricao', $sortedKeys, true),
+                    'quantidadeCol' => array_search('quantidade', $sortedKeys, true),
+                    'precoUnitarioCol' => array_search('precoUnitario', $sortedKeys, true),
+                    'totalCol' => array_search('total', $sortedKeys, true),
+                    'ivaCol' => array_search('iva', $sortedKeys, true),
+                    'unidadeCol' => array_search('unidade', $sortedKeys, true),
+                    'columnCount' => count($foundColumns),
+                    'headerLineIdx' => $idx,
+                ];
+
+                // Converter false para null
+                foreach (['codigoCol', 'descricaoCol', 'quantidadeCol', 'precoUnitarioCol', 'totalCol', 'ivaCol', 'unidadeCol'] as $col) {
+                    if ($result[$col] === false) {
+                        $result[$col] = null;
+                    }
+                }
+
+                Log::info('[PO-OCR] Cabeçalhos de colunas detetados.', [
+                    'lineIdx' => $idx,
+                    'columns' => $sortedKeys,
+                    'count' => count($foundColumns),
+                ]);
+
+                return $result;
+            }
+        }
+
+        return [
+            'codigoCol' => null, 'descricaoCol' => null, 'quantidadeCol' => null,
+            'precoUnitarioCol' => null, 'totalCol' => null, 'ivaCol' => null,
+            'unidadeCol' => null, 'columnCount' => 0, 'headerLineIdx' => null,
+        ];
+    }
+
+    /**
+     * Faz o parsing de uma linha de dados usando a estrutura de colunas detetada.
+     *
+     * @param  string  $line  Linha de dados
+     * @param  array   $colMap  Mapa de colunas (do detectColumnHeaders)
+     * @return array|null  Linha estruturada ou null se não foi possível fazer parse
+     */
+    private function parseDataLineWithColumns(string $line, array $colMap): ?array
+    {
+        $stripped = trim($line);
+        if (empty($stripped)) {
+            return null;
+        }
+
+        // Divide a linha em tokens (palavras e números)
+        if (!preg_match_all('/(?:\[?[A-Za-zÀ-ÿ0-9.,%\/+)-]+\]?)/u', $stripped, $tokenMatches)) {
+            return null;
+        }
+        $tokens = array_map('trim', $tokenMatches[0]);
+        $tokens = array_values(array_filter($tokens, fn($t) => $t !== ''));
+        if (empty($tokens)) {
+            return null;
+        }
+
+        $totalCols = $colMap['columnCount'] ?? 0;
+        if ($totalCols < 2) {
+            return null;
+        }
+
+        $safeGet = function (?int $colIdx) use ($tokens) {
+            if ($colIdx !== null && isset($tokens[$colIdx])) {
+                return $tokens[$colIdx];
+            }
+            return null;
+        };
+
+        $codeToken = $safeGet($colMap['codigoCol'] ?? null);
+        $descToken = $safeGet($colMap['descricaoCol'] ?? null);
+        $qtyToken = $safeGet($colMap['quantidadeCol'] ?? null);
+        $priceToken = $safeGet($colMap['precoUnitarioCol'] ?? null);
+
+        // Código: aceita códigos puramente numéricos (2-4 dígitos) e alfanuméricos (ex: ART-011, FD-901)
+        $codigo = '';
+        if ($codeToken && preg_match('/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?$/', $codeToken)) {
+            $codigo = $codeToken;
+        }
+
+        // Descrição: pode ocupar um intervalo de tokens até ao primeiro token numérico
+        // Os índices do cabeçalho identificam as COLUNAS, não os limites exatos dos tokens —
+        // as descrições nos dados ocupam múltiplos tokens, por isso varremos para a frente
+        // até encontrar o primeiro token puramente numérico (quantidade ou preço).
+        $descricao = '';
+        $codeIdx = $colMap['codigoCol'] ?? null;
+        $descIdx = $colMap['descricaoCol'] ?? null;
+        $qtyIdx = $colMap['quantidadeCol'] ?? null;
+        $priceIdx = $colMap['precoUnitarioCol'] ?? null;
+
+        $descStart = $descIdx ?? (($codeIdx !== null) ? $codeIdx + 1 : 0);
+        $descEnd = count($tokens);
+        if ($descStart < count($tokens)) {
+            for ($i = $descStart + 1; $i < count($tokens); $i++) {
+                $token = $tokens[$i];
+                if (preg_match('/^\d+(?:[.,]\d+)?$/', $token)) {
+                    $descEnd = $i;
+                    break;
+                }
+            }
+        }
+
+        if ($descStart < $descEnd) {
+            $descParts = array_slice($tokens, $descStart, $descEnd - $descStart);
+            // Filtra tokens que são apenas artefactos de tabela
+            $descParts = array_filter($descParts, function ($t) {
+                $tUpper = strtoupper(trim($t, '[]|()'));
+                return !in_array($tUpper, ['', '6%', '13%', '23%', '6', '13', '23'], true)
+                    && !preg_match('/^\d+[%]?$/', $t)
+                    && !in_array($t, ['[', ']', '|', '(', ')'], true);
+            });
+            $descricao = implode(' ', $descParts);
+            $descricao = $this->sanitizeDescription($descricao);
+        }
+
+        // Quantidade e preço
+        $quantidade = $qtyToken ? $this->normalizeNumber($qtyToken) : 0;
+        $precoUnitario = $priceToken ? $this->normalizeNumber($priceToken) : 0;
+
+        // Verifica se priceToken é uma taxa de IVA e não preço
+        $vatRates = [6.0, 13.0, 23.0];
+        if (in_array($precoUnitario, $vatRates, true) && $priceToken && preg_match('/^\d{1,2}\s*%?$/', $priceToken)) {
+            $precoUnitario = 0;
+        }
+
+        // Deteção de unidade
+        $unidade = null;
+        $unitKeywords = ['KG', 'CX', 'UN', 'G', 'L', 'ML', 'LT', 'M', 'PCT', 'SAC', 'MOLHO', 'EMB', 'PAR'];
+        foreach ($tokens as $token) {
+            $upper = strtoupper(trim($token, '[]|()'));
+            if (in_array($upper, $unitKeywords, true)) {
+                $unidade = $upper;
+                break;
+            }
+        }
+
+        // Se não temos descrição nem código, descartamos
+        if (empty($descricao) && empty($codigo)) {
+            return null;
+        }
+
+        // Filtra linhas de cabeçalho/total que passaram
+        $descClean = trim(preg_replace('/[,\s.\[\]|()\-]+/u', '', $descricao));
+        if (mb_strlen($descClean) < 3) {
+            return null;
+        }
+
+        return [
+            'codigo' => $codigo,
+            'descricao' => $descricao,
+            'quantidade' => $quantidade,
+            'precoUnitario' => $precoUnitario,
+            'unidade' => $unidade,
+        ];
     }
 
     /**
@@ -1440,10 +1874,67 @@ class PurchaseOrderController extends Controller
      */
     private function isLineExcluded(string $line): bool
     {
-        return (bool) preg_match(
-            '/(?:total|iva|subtotal|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.)/i',
+        $line = trim($line);
+        if (empty($line)) {
+            return true;
+        }
+
+        // Exclude by keyword patterns
+        if ((bool) preg_match(
+            '/(?:total|iva|subtotal|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.|'
+            . 'nota\s+de\s+encomenda|entrega\s+prevista|documento\s+n[ºo]|'
+            . 'data\s+emiss[ãa]o|c[óo]digo\s+artigo|descri[çc][ãa]o|fornecedor)/i',
             $line
-        );
+        )) {
+            return true;
+        }
+
+        // Exclude URL / file path patterns
+        if (preg_match('/^(?:file|http)s?[:\/]/i', $line)) {
+            return true;
+        }
+
+        // Exclude page number patterns (e.g., "1/1")
+        if (preg_match('/^\d+\s*\/\s*\d+\s*$/', $line)) {
+            return true;
+        }
+
+        // ── DIAGNOSTIC FIX: Exclude short garbage fragments ──
+        // Lines with < 3 meaningful alphanumeric characters are noise
+        $alphaOnly = preg_replace('/[^A-Za-zÀ-ÿ0-9]/u', '', $line);
+        if (mb_strlen($alphaOnly) < 3) {
+            return true;
+        }
+
+        // Exclude standalone date fragments (e.g., "/05/26", "24/05/26")
+        if (preg_match('#^\d{1,2}\s*[/\-]\s*\d{1,2}\s*(?:[/\-]\s*\d{2,4})?\s*$#', $line)) {
+            return true;
+        }
+
+        // Exclude standalone units of measure
+        if (preg_match('/^(?:un|kg|g|l|ml|lt|cx|pct|m|cm|mm|hrs|hr|saco?|molho|dose|emb|par)$/i', $line)) {
+            return true;
+        }
+
+        // Exclude standalone VAT percentages (e.g., "6%", "23%")
+        if (preg_match('/^\d{1,2}\s*%$/', $line)) {
+            return true;
+        }
+
+        // Exclude lines that are just a phone number (9+ digits with optional spaces/+)
+        if (preg_match('/^\+?\d[\d\s]{7,}$/', $line) && preg_match_all('/\d/', $line) >= 8) {
+            return true;
+        }
+
+        // Exclude lines with code patterns that match known header/address words
+        if (preg_match('/^(?:NOTA|DATA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[ÃA]O|'
+            . 'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|TOTAL|FORNECEDOR|NIF|TEL|TELEFONE|'
+            . 'CONTRIBUINTE|RUA|AV\.|AVENIDA|P[ÁA]GINA|OBS|IVA|EUR|ARTIGO|'
+            . 'DESIGNA[ÇC][ÃA]O|UNIDADE|MEDIDA|REFER[ÊE]NCIA)\b$/i', $line)) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -1473,10 +1964,41 @@ class PurchaseOrderController extends Controller
             $productModel = $productResult['model'] ?? null;
 
             $productCode = $productModel ? (string) $productModel->code : ($line['codigo'] ?? '');
-            $description = $productModel ? $productModel->description : ($line['descricao'] ?? '');
+            $rawOcrDesc = (string) ($line['descricao'] ?? '');
+            $sanitizedOcr = $this->sanitizeDescription($rawOcrDesc);
+
+            if ($productModel) {
+                $sanitizedDb = $this->sanitizeDescription((string) $productModel->description);
+                $description = $sanitizedDb ?: ($sanitizedOcr ?: $rawOcrDesc);
+            } else {
+                $description = $sanitizedOcr ?: $rawOcrDesc;
+            }
 
             // Pula linhas sem código nem descrição (ruído do OCR)
             if (empty(trim($productCode)) && empty(trim($description))) {
+                continue;
+            }
+
+            // ── Quality threshold: skip garbage descriptions ──
+            $descAlpha = preg_replace('/[^A-Za-zÀ-ÿ0-9]/u', '', $description);
+            if (mb_strlen($descAlpha) < 3 && empty(trim($productCode))) {
+                Log::info('[PO-OCR] Skipping low-quality line (desc too short).', [
+                    'description' => $description,
+                    'code' => $productCode,
+                ]);
+                continue;
+            }
+
+            // Skip lines where description looks like a file path or URL
+            if (preg_match('#^(?:file|http)s?[:/]|^[A-Z]:[\\\\/]#i', $description)) {
+                Log::info('[PO-OCR] Skipping line with file path / URL description.', [
+                    'description' => $description,
+                ]);
+                continue;
+            }
+
+            // Skip lines where description is just numbers (price/qty fragments)
+            if (preg_match('/^[\d.,\s]+$/', $description) && empty(trim($productCode))) {
                 continue;
             }
 
@@ -1487,7 +2009,7 @@ class PurchaseOrderController extends Controller
                 'productCode' => $productCode,
                 'description' => $description,
                 'productFamily' => $productModel ? $productModel->family : $this->ensureDefaultFamily(),
-                'productUnit' => $productModel ? $productModel->unit : $this->ensureDefaultUnit(),
+                'productUnit' => $productModel ? $productModel->unit : $this->resolveUnitFromOcr($line['unidade'] ?? ''),
                 'taxRateCode' => $taxRateCode,
                 'taxRate' => $taxRatePercent,
                 'quantity' => $this->normalizeNumber($line['quantidade'] ?? 1),
@@ -1720,6 +2242,7 @@ class PurchaseOrderController extends Controller
      */
     private function sanitizeDescription(string $value): string
     {
+        $original = $value;
         $value = trim($value);
 
         // 1. Remove cabeçalhos de colunas tabulares
@@ -1756,11 +2279,35 @@ class PurchaseOrderController extends Controller
         // 9. Remove múltiplos espaços
         $value = preg_replace('/\s+/', ' ', $value);
 
-        // 10. Limita a 100 caracteres
+        // 10. Remove artefactos de vírgulas internas (ex: ", ," de bordas de tabela mal lidas pelo OCR)
+        $value = preg_replace('/(?:\s*,\s*){2,}/u', ' ', $value);
+        // 10b. Remove artefactos de traços/hifens (ex: "---" ou "- - -" de bordas de tabela mal lidas)
+        //      Também cobre variantes Unicode: – (U+2013), — (U+2014), − (U+2212)
+        $value = preg_replace('/(?:[-–—−]+\s*){2,}/u', ' ', $value);
+        $value = preg_replace('/\s+/u', ' ', $value);
+        $value = trim($value);
+
+        // 11. Remove artefactos comuns que sobram (apenas pontuação no início/fim)
+        $value = preg_replace('/^[–—−\-.,\s;|\])]+/u', '', $value);
+        $value = preg_replace('/[–—−\-.,\s;|\])]+$/u', '', $value);
+        // Se a descrição ficou só com pontuação/espaços, retorna vazia
+        $clean = preg_replace('/[^A-Za-z0-9À-ÿ]/u', '', $value);
+        if (mb_strlen($clean) < 2) {
+            return '';
+        }
+
+        // 12. Limita a 100 caracteres
         if (mb_strlen($value) > 100) {
             $value = mb_substr($value, 0, 100);
         }
 
-        return trim($value);
+        $result = trim($value);
+        if ($result !== trim($original)) {
+            \Illuminate\Support\Facades\Log::debug('[PO-OCR] sanitizeDescription cleaned', [
+                'original' => $original,
+                'result' => $result,
+            ]);
+        }
+        return $result;
     }
 }

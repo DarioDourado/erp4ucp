@@ -14,6 +14,8 @@ import numpy as np
 from PIL import Image
 import easyocr
 import re
+import os
+import tempfile
 from pathlib import Path
 import logging
 
@@ -343,6 +345,8 @@ def _assemble_lines_from_ocr_data(results: list) -> list[dict]:
     3. Sort each group by X coordinate (left to right)
     4. Join group text with spaces → 1 line
     5. Calculate consolidated bbox and average confidence
+    6. Post-process: merge adjacent word-per-line groups that belong
+       to the same table row (similar Y, increasing X)
 
     Args:
         results: EasyOCR readtext() output
@@ -358,7 +362,10 @@ def _assemble_lines_from_ocr_data(results: list) -> list[dict]:
         text = text.strip()
         if not text:
             continue
-        rect = _polygon_to_rect(bbox)
+        try:
+            rect = _polygon_to_rect(bbox)
+        except Exception:
+            continue
         # rect is [x, y, w, h]
         y_center = rect[1] + rect[3] / 2
         y_top = rect[1]
@@ -371,6 +378,7 @@ def _assemble_lines_from_ocr_data(results: list) -> list[dict]:
             'y_top': y_top,
             'y_bottom': y_bottom,
             'x': rect[0],
+            'width': rect[2],
         })
 
     if not detections:
@@ -379,12 +387,21 @@ def _assemble_lines_from_ocr_data(results: list) -> list[dict]:
     # Sort by Y center
     detections.sort(key=lambda d: d['y_center'])
 
-    # Group by vertical overlap
+    # Calculate average line height safely
+    heights = [d['bbox'][3] for d in detections if d['bbox'][3] > 0]
+    if not heights:
+        return [{'text': d['text'], 'bbox': d['bbox'], 'confidence': d['confidence']} for d in detections]
+    avg_line_height = float(np.mean(heights))
+    if avg_line_height <= 0:
+        avg_line_height = 20  # sensible default for typical document text
+
+    # Tolerate 80% of average line height for vertical grouping
+    # (increased from 40% to handle table cells with slight Y variation)
+    y_tolerance = avg_line_height * 0.8
+
+    # ── Pass 1: Group by vertical overlap ──
     lines = []
     current_group = [detections[0]]
-    avg_line_height = np.mean([d['bbox'][3] for d in detections])
-    # Tolerate 40% of average line height for vertical grouping
-    y_tolerance = avg_line_height * 0.4
 
     for d in detections[1:]:
         # Check if this detection overlaps vertically with the current group
@@ -403,6 +420,47 @@ def _assemble_lines_from_ocr_data(results: list) -> list[dict]:
     if current_group:
         lines.append(_flush_line_group(current_group))
 
+    # ── Pass 2: Merge word-per-line groups into table rows ──
+    # If most lines have only 1-2 words and are at similar Y positions
+    # with increasing X, they are likely table cells that belong together.
+    if len(lines) >= 3:
+        word_counts = [len(l['text'].split()) for l in lines]
+        avg_words = sum(word_counts) / len(word_counts)
+        # If average < 2 words per line, text is likely word-per-line
+        if avg_words < 2.0:
+            merged = []
+            current_merged = [lines[0]]
+            # Use a tighter Y tolerance for merging: 1.5x avg line height
+            merge_y_tolerance = avg_line_height * 1.5
+
+            for i in range(1, len(lines)):
+                prev = lines[i - 1]
+                curr = lines[i]
+                prev_y_center = prev['bbox'][1] + prev['bbox'][3] / 2
+                curr_y_center = curr['bbox'][1] + curr['bbox'][3] / 2
+                y_diff = abs(curr_y_center - prev_y_center)
+                # Check if X increases (left-to-right) and Y is close
+                prev_x_end = prev['bbox'][0] + prev['bbox'][2]
+                curr_x_start = curr['bbox'][0]
+                x_forward = curr_x_start >= prev_x_end - (avg_line_height * 2)  # allow slight overlap
+
+                if y_diff <= merge_y_tolerance and x_forward:
+                    # Same row: merge into current_merged group
+                    current_merged.append(curr)
+                else:
+                    # New row: flush current_merged and start new
+                    merged.append(_flush_line_group(current_merged))
+                    current_merged = [curr]
+
+            if current_merged:
+                merged.append(_flush_line_group(current_merged))
+
+            logger.info(
+                f"Line assembly Pass 2: merged {len(lines)} word-per-line groups "
+                f"into {len(merged)} logical rows (avg words/line was {avg_words:.1f})"
+            )
+            lines = merged
+
     return lines
 
 
@@ -410,22 +468,29 @@ def _flush_line_group(group: list[dict]) -> dict:
     """
     Convert a group of same-line detections into a single line entry.
     Sort words left-to-right and join with spaces.
+    Works with both raw detections (have 'x' key) and pre-merged lines.
     """
-    group.sort(key=lambda d: d['x'])
+    def _get_x(d: dict) -> int:
+        return d.get('x', d['bbox'][0] if d.get('bbox') else 0)
+
+    group.sort(key=_get_x)
 
     text = ' '.join(d['text'] for d in group)
-    confidences = [d['confidence'] for d in group]
-    avg_conf = round(sum(confidences) / len(confidences), 1)
+    confidences = [d['confidence'] for d in group if 'confidence' in d]
+    avg_conf = round(sum(confidences) / len(confidences), 1) if confidences else 0.0
 
-    xs = [d['bbox'][0] for d in group]
-    ys = [d['bbox'][1] for d in group]
-    right_edges = [d['bbox'][0] + d['bbox'][2] for d in group]
-    bottom_edges = [d['bbox'][1] + d['bbox'][3] for d in group]
+    xs = [d['bbox'][0] for d in group if d.get('bbox')]
+    ys = [d['bbox'][1] for d in group if d.get('bbox')]
+    right_edges = [d['bbox'][0] + d['bbox'][2] for d in group if d.get('bbox')]
+    bottom_edges = [d['bbox'][1] + d['bbox'][3] for d in group if d.get('bbox')]
 
-    x = min(xs)
-    y = min(ys)
-    w = max(right_edges) - x
-    h = max(bottom_edges) - y
+    if xs:
+        x = min(xs)
+        y = min(ys)
+        w = max(right_edges) - x
+        h = max(bottom_edges) - y
+    else:
+        x, y, w, h = 0, 0, 0, 0
 
     return {
         'text': text,
@@ -434,27 +499,66 @@ def _flush_line_group(group: list[dict]) -> dict:
     }
 
 
-# ── Text Extraction ───────────────────────────────────────────────────────────
+# ── PDF Support ────────────────────────────────────────────────────────────────
 
-def extract_text_with_layout(image_path: str | Path) -> dict:
+def _pdf_to_images(pdf_path: str | Path) -> list[str]:
     """
-    Extract text from an image using EasyOCR with layout analysis.
+    Convert PDF pages to temporary PNG images for OCR processing.
 
-    Uses EasyOCR single-pass detection (no multi-PSM fallback needed).
-    EasyOCR uses deep learning models that handle varying layouts natively.
-
-    Returns both raw text and structured data with bounding boxes.
+    Uses PyMuPDF (fitz) to render each page at 300 DPI, which provides
+    sufficient resolution for accurate OCR. Each page is saved as a
+    temporary PNG file.
 
     Args:
-        image_path: Path to the input image
+        pdf_path: Path to the PDF document
 
     Returns:
-        dict with keys:
-            - raw_text: Full extracted text
-            - lines: List of {text, bbox (x, y, w, h), confidence}
-            - tables: Detected tabular regions with cells
-            - hocr: Empty string (not available from EasyOCR)
-            - psm_used: None (not applicable)
+        List of temporary PNG file paths (one per page).
+        Caller is responsible for cleanup.
+    """
+    try:
+        import fitz  # PyMuPDF — lazy import so the module loads without it for image-only use
+    except ImportError:
+        raise ImportError(
+            "PyMuPDF (fitz) is required for PDF processing. "
+            "Install it with: pip install PyMuPDF"
+        )
+
+    doc = fitz.open(str(pdf_path))
+    image_paths = []
+
+    try:
+        for i, page in enumerate(doc):
+            # Render page at 300 DPI — good balance of quality vs performance
+            pix = page.get_pixmap(dpi=300)
+            fd, img_path = tempfile.mkstemp(suffix=f'_page{i+1:03d}.png')
+            os.close(fd)
+            pix.save(img_path)
+            image_paths.append(img_path)
+            logger.info(f"PDF page {i+1}/{len(doc)} rendered to {img_path}")
+    finally:
+        doc.close()
+
+    if not image_paths:
+        logger.warning(f"PDF has no renderable pages: {pdf_path}")
+
+    return image_paths
+
+
+# ── Text Extraction ───────────────────────────────────────────────────────────
+
+def _ocr_single_image(image_path: str | Path) -> dict:
+    """
+    Extract text from a single image using EasyOCR with layout analysis (internal helper).
+
+    Preprocesses the image (perspective correction, upscale, deskew) and
+    runs EasyOCR. Returns structured results.
+
+    Args:
+        image_path: Path to the input image (JPEG, PNG, TIFF)
+
+    Returns:
+        dict with keys: raw_text, lines, tables, hocr, psm_used
     """
     # Preprocess the image
     processed = preprocess_image(image_path)
@@ -481,6 +585,76 @@ def extract_text_with_layout(image_path: str | Path) -> dict:
         'hocr': '',
         'psm_used': None,
     }
+
+
+def extract_text_with_layout(image_path: str | Path) -> dict:
+    """
+    Extract text from an image or PDF using EasyOCR with layout analysis.
+
+    For PDF documents, each page is converted to a high-resolution PNG image
+    (300 DPI) using PyMuPDF, then processed through the standard OCR pipeline.
+    Multi-page results are concatenated with page separators.
+
+    Uses EasyOCR single-pass detection (no multi-PSM fallback needed).
+    EasyOCR uses deep learning models that handle varying layouts natively.
+
+    Returns both raw text and structured data with bounding boxes.
+
+    Args:
+        image_path: Path to the input image or PDF
+
+    Returns:
+        dict with keys:
+            - raw_text: Full extracted text
+            - lines: List of {text, bbox (x, y, w, h), confidence}
+            - tables: Detected tabular regions with cells
+            - hocr: Empty string (not available from EasyOCR)
+            - psm_used: None (not applicable)
+    """
+    path = Path(image_path)
+
+    # ── PDF: convert to images and process each page ────────────────────
+    if path.suffix.lower() == '.pdf':
+        logger.info(f"Processing PDF document: {path.name}")
+        image_paths = _pdf_to_images(path)
+
+        if not image_paths:
+            return {
+                'raw_text': '',
+                'lines': [],
+                'tables': [],
+                'hocr': '',
+                'psm_used': None,
+            }
+
+        try:
+            all_lines = []
+            all_tables = []
+            raw_text_parts = []
+
+            for img_path in image_paths:
+                page_result = _ocr_single_image(img_path)
+                raw_text_parts.append(page_result['raw_text'])
+                all_lines.extend(page_result['lines'])
+                all_tables.extend(page_result['tables'])
+
+            return {
+                'raw_text': '\n--- PAGE BREAK ---\n'.join(raw_text_parts),
+                'lines': all_lines,
+                'tables': all_tables,
+                'hocr': '',
+                'psm_used': None,
+            }
+        finally:
+            # Clean up temporary page images
+            for img_path in image_paths:
+                try:
+                    os.unlink(img_path)
+                except OSError:
+                    pass
+
+    # ── Single image ────────────────────────────────────────────────────
+    return _ocr_single_image(path)
 
 
 def _has_product_unit(text: str) -> bool:
@@ -564,9 +738,40 @@ def extract_text_simple(image_path: str | Path) -> str:
     """
     Simple text extraction without layout (fallback).
 
+    For PDFs, renders each page as an image and processes
+    them through the standard OCR pipeline, joining results
+    with page separators.
+
     Uses EasyOCR with paragraph mode for general documents.
+
+    Args:
+        image_path: Path to the input image or PDF
     """
-    processed = preprocess_image(image_path)
+    path = Path(image_path)
+
+    # ── PDF: convert to images and process each page ────────────────────
+    if path.suffix.lower() == '.pdf':
+        logger.info(f"Processing PDF document (simple): {path.name}")
+        image_paths = _pdf_to_images(path)
+
+        if not image_paths:
+            return ''
+
+        try:
+            texts = []
+            for img_path in image_paths:
+                page_result = _ocr_single_image(img_path)
+                texts.append(page_result['raw_text'])
+            return '\n--- PAGE BREAK ---\n'.join(texts).strip()
+        finally:
+            for img_path in image_paths:
+                try:
+                    os.unlink(img_path)
+                except OSError:
+                    pass
+
+    # ── Single image ────────────────────────────────────────────────────
+    processed = preprocess_image(path)
     reader = get_reader()
     results = reader.readtext(processed, paragraph=False)
     text = '\n'.join(t for _, t, _ in results) if results else ''
