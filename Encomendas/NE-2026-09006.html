@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Nota de Encomenda - NE-2026-09006</title>
+    <style>
+        body { font-family: Arial, sans-serif; color: #000; margin: 40px; background: #fff; line-height: 1.4; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 10px; border: 1px solid #eee; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .title { font-size: 24px; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+        .company-details { font-size: 12px; border-bottom: 2px solid #000; padding-bottom: 15px; }
+        .info-section { font-size: 13px; margin-bottom: 20px; }
+        .info-box { border: 1px solid #ccc; padding: 10px; width: 48%; float: left; min-height: 80px; box-sizing: border-box; }
+        .info-box-right { float: right; }
+        .clear { clear: both; }
+        .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .items-table th { background: #f2f2f2; border: 1px solid #ddd; font-size: 12px; padding: 8px; text-transform: uppercase; }
+        .items-table td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }
+        .totals-table { width: 40%; float: right; border-collapse: collapse; margin-top: 10px; }
+        .totals-table td { padding: 6px; font-size: 13px; border-bottom: 1px solid #eee; }
+        .totals-table .grand-total { font-weight: bold; background: #f2f2f2; border: 1px solid #000; font-size: 15px; }
+        .footer { margin-top: 60px; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px; }
+    </style>
+</head>
+<body>
+<div class="invoice-box">
+    <div class="text-center">
+        <div class="title">NOTA DE ENCOMENDA</div>
+        <div class="company-details">
+            <strong>SALSICHARIA BEIRÃ, SA</strong><br>
+            Zona Industrial do Fundão, Lote 5, 6230-000 Fundão<br>
+            NIF: 516789012 | Tel: +351 27 890 1234
+        </div>
+    </div>
+
+    <div class="info-section" style="margin-top:15px;">
+        <div class="info-box">
+            <strong>Cliente:</strong><br>
+            ATLÂNTICO CASH &amp; CARRY, LDA<br>
+            Rua das Indústrias, Lote 8, 4700-000 Braga<br>
+            NIF: 502345671
+        </div>
+        <div class="info-box info-box-right">
+            <strong>Documento Nº:</strong> NE-2026-09006<br>
+            <strong>Data Emissão:</strong> 15/06/2026<br>
+            <strong>Entrega Prevista:</strong> 18/06/2026<br>
+            <strong>Condições Pagamento:</strong> 45 dias
+        </div>
+        <div class="clear"></div>
+    </div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>Código</th>
+                <th>Descrição do Artigo</th>
+                <th>Qtd</th>
+                <th>Un</th>
+                <th>P.Unit (€)</th>
+                <th>IVA</th>
+                <th>Total (€)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>CAR-001</td>
+                <td>Presunto Ibérico fatiado 100g (Montalva)</td>
+                <td>120</td>
+                <td>un</td>
+                <td>3,99</td>
+                <td>6%</td>
+                <td>478,80</td>
+            </tr>
+            <tr>
+                <td>CAR-002</td>
+                <td>Chouriço de Carne 300g (Casa da Matança)</td>
+                <td>80</td>
+                <td>un</td>
+                <td>2,85</td>
+                <td>6%</td>
+                <td>228,00</td>
+            </tr>
+            <tr>
+                <td>CAR-003</td>
+                <td>Linguiça defumada 250g</td>
+                <td>60</td>
+                <td>un</td>
+                <td>2,40</td>
+                <td>6%</td>
+                <td>144,00</td>
+            </tr>
+            <tr>
+                <td>CAR-004</td>
+                <td>Fiambre de Peru fatiado 200g (Campofrio)</td>
+                <td>100</td>
+                <td>un</td>
+                <td>2,10</td>
+                <td>6%</td>
+                <td>210,00</td>
+            </tr>
+            <tr>
+                <td>CAR-005</td>
+                <td>Salame Italiano 150g (Nobre)</td>
+                <td>75</td>
+                <td>un</td>
+                <td>3,20</td>
+                <td>6%</td>
+                <td>240,00</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="clear"></div>
+    <table class="totals-table">
+        <tr>
+            <td>Subtotal (s/ IVA):</td>
+            <td class="text-right">1.226,23 €</td>
+        </tr>
+        <tr>
+            <td>IVA (6%):</td>
+            <td class="text-right">73,57 €</td>
+        </tr>
+        <tr class="grand-total">
+            <td>TOTAL:</td>
+            <td class="text-right">1.300,80 €</td>
+        </tr>
+    </table>
+    <div class="clear"></div>
+
+    <div class="footer">
+        <strong>Observações:</strong> Transporte em viatura frigorífica entre 0°C e 4°C. Certificado de origem obrigatório para presuntos ibéricos.<br>
+        Documento processado por sistema informático.
+    </div>
+</div>
+</body>
+</html>

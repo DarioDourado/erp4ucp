@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Nota de Encomenda - NE-2026-09010</title>
+    <style>
+        body { font-family: Arial, sans-serif; color: #000; margin: 40px; background: #fff; line-height: 1.4; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 10px; border: 1px solid #eee; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .title { font-size: 24px; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+        .company-details { font-size: 12px; border-bottom: 2px solid #000; padding-bottom: 15px; }
+        .info-section { font-size: 13px; margin-bottom: 20px; }
+        .info-box { border: 1px solid #ccc; padding: 10px; width: 48%; float: left; min-height: 80px; box-sizing: border-box; }
+        .info-box-right { float: right; }
+        .clear { clear: both; }
+        .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .items-table th { background: #f2f2f2; border: 1px solid #ddd; font-size: 12px; padding: 8px; text-transform: uppercase; }
+        .items-table td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }
+        .totals-table { width: 40%; float: right; border-collapse: collapse; margin-top: 10px; }
+        .totals-table td { padding: 6px; font-size: 13px; border-bottom: 1px solid #eee; }
+        .totals-table .grand-total { font-weight: bold; background: #f2f2f2; border: 1px solid #000; font-size: 15px; }
+        .footer { margin-top: 60px; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px; }
+    </style>
+</head>
+<body>
+<div class="invoice-box">
+    <div class="text-center">
+        <div class="title">NOTA DE ENCOMENDA</div>
+        <div class="company-details">
+            <strong>GULOSEIMAS NACIONAIS, SA</strong><br>
+            Rua do Açúcar, 25, 2900-000 Setúbal<br>
+            NIF: 520123456 | Tel: +351 26 567 8901
+        </div>
+    </div>
+
+    <div class="info-section" style="margin-top:15px;">
+        <div class="info-box">
+            <strong>Cliente:</strong><br>
+            ATLÂNTICO CASH &amp; CARRY, LDA<br>
+            Rua das Indústrias, Lote 8, 4700-000 Braga<br>
+            NIF: 502345671
+        </div>
+        <div class="info-box info-box-right">
+            <strong>Documento Nº:</strong> NE-2026-09010<br>
+            <strong>Data Emissão:</strong> 20/06/2026<br>
+            <strong>Entrega Prevista:</strong> 23/06/2026<br>
+            <strong>Condições Pagamento:</strong> 30 dias
+        </div>
+        <div class="clear"></div>
+    </div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>Código</th>
+                <th>Descrição do Artigo</th>
+                <th>Qtd</th>
+                <th>Un</th>
+                <th>P.Unit (€)</th>
+                <th>IVA</th>
+                <th>Total (€)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>SNK-001</td>
+                <td>Batata Frita Sal 45g (Lay's)</td>
+                <td>300</td>
+                <td>un</td>
+                <td>0,99</td>
+                <td>23%</td>
+                <td>297,00</td>
+            </tr>
+            <tr>
+                <td>SNK-002</td>
+                <td>Chocolate de Leite 100g (Milka)</td>
+                <td>200</td>
+                <td>un</td>
+                <td>1,49</td>
+                <td>23%</td>
+                <td>298,00</td>
+            </tr>
+            <tr>
+                <td>SNK-003</td>
+                <td>Gomas Sortidas 200g (Haribo)</td>
+                <td>150</td>
+                <td>un</td>
+                <td>1,79</td>
+                <td>23%</td>
+                <td>268,50</td>
+            </tr>
+            <tr>
+                <td>SNK-004</td>
+                <td>Amendoim torrado 200g (Planters)</td>
+                <td>120</td>
+                <td>un</td>
+                <td>1,35</td>
+                <td>23%</td>
+                <td>162,00</td>
+            </tr>
+            <tr>
+                <td>SNK-005</td>
+                <td>Café Expresso Cápsulas (pack 10) (Delta)</td>
+                <td>80</td>
+                <td>pack</td>
+                <td>3,99</td>
+                <td>23%</td>
+                <td>319,20</td>
+            </tr>
+            <tr>
+                <td>SNK-006</td>
+                <td>Chá Verde 20 saquetas (Lipton)</td>
+                <td>100</td>
+                <td>un</td>
+                <td>1,99</td>
+                <td>23%</td>
+                <td>199,00</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="clear"></div>
+    <table class="totals-table">
+        <tr>
+            <td>Subtotal (s/ IVA):</td>
+            <td class="text-right">1.254,63 €</td>
+        </tr>
+        <tr>
+            <td>IVA (23%):</td>
+            <td class="text-right">288,57 €</td>
+        </tr>
+        <tr class="grand-total">
+            <td>TOTAL:</td>
+            <td class="text-right">1.543,70 €</td>
+        </tr>
+    </table>
+    <div class="clear"></div>
+
+    <div class="footer">
+        <strong>Observações:</strong> Armazenar em local seco e fresco, longe de fontes de calor. Produtos sujeitos a rotação FIFO.<br>
+        Documento processado por sistema informático.
+    </div>
+</div>
+</body>
+</html>

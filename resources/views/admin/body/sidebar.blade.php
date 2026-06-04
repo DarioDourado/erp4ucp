@@ -47,7 +47,6 @@
                         <li><a href="{{  route('purchaseOrder.all') }}">Encomendas a Fornecedores</a></li>
                         <li><a href="{{  route('purchaseOrder.ocr') }}">OCR — Ler Documento</a></li>
                         <li><a href="{{  route('goodsReceipt.all') }}">Entradas de Mercadoria</a></li>
-                        <li><a href="{{  route('goodsReceipt.ocr') }}">OCR — Ler Guia</a></li>
                         <li><a href="tables-datatable.html">Data Tables</a></li>
                         <li><a href="tables-responsive.html">Responsive Table</a></li>
                         <li><a href="tables-editable.html">Editable Table</a></li>

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Nota de Encomenda - NE-2026-09003</title>
+    <style>
+        body { font-family: Arial, sans-serif; color: #000; margin: 40px; background: #fff; line-height: 1.4; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 10px; border: 1px solid #eee; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .title { font-size: 24px; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+        .company-details { font-size: 12px; border-bottom: 2px solid #000; padding-bottom: 15px; }
+        .info-section { font-size: 13px; margin-bottom: 20px; }
+        .info-box { border: 1px solid #ccc; padding: 10px; width: 48%; float: left; min-height: 80px; box-sizing: border-box; }
+        .info-box-right { float: right; }
+        .clear { clear: both; }
+        .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .items-table th { background: #f2f2f2; border: 1px solid #ddd; font-size: 12px; padding: 8px; text-transform: uppercase; }
+        .items-table td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }
+        .totals-table { width: 40%; float: right; border-collapse: collapse; margin-top: 10px; }
+        .totals-table td { padding: 6px; font-size: 13px; border-bottom: 1px solid #eee; }
+        .totals-table .grand-total { font-weight: bold; background: #f2f2f2; border: 1px solid #000; font-size: 15px; }
+        .footer { margin-top: 60px; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px; }
+    </style>
+</head>
+<body>
+<div class="invoice-box">
+    <div class="text-center">
+        <div class="title">NOTA DE ENCOMENDA</div>
+        <div class="company-details">
+            <strong>LIMPEX INDUSTRIAL, LDA</strong><br>
+            Estrada Nacional 1, Km 45, 2000-000 Santarém<br>
+            NIF: 513456789 | Tel: +351 24 321 5678
+        </div>
+    </div>
+
+    <div class="info-section" style="margin-top:15px;">
+        <div class="info-box">
+            <strong>Cliente:</strong><br>
+            ATLÂNTICO CASH &amp; CARRY, LDA<br>
+            Rua das Indústrias, Lote 8, 4700-000 Braga<br>
+            NIF: 502345671
+        </div>
+        <div class="info-box info-box-right">
+            <strong>Documento Nº:</strong> NE-2026-09003<br>
+            <strong>Data Emissão:</strong> 12/06/2026<br>
+            <strong>Entrega Prevista:</strong> 15/06/2026<br>
+            <strong>Condições Pagamento:</strong> Pronto pagamento
+        </div>
+        <div class="clear"></div>
+    </div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>Código</th>
+                <th>Descrição do Artigo</th>
+                <th>Qtd</th>
+                <th>Un</th>
+                <th>P.Unit (€)</th>
+                <th>IVA</th>
+                <th>Total (€)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>LIM-010</td>
+                <td>Detergente Loiça 500ml (Fairy)</td>
+                <td>200</td>
+                <td>un</td>
+                <td>1,29</td>
+                <td>23%</td>
+                <td>258,00</td>
+            </tr>
+            <tr>
+                <td>LIM-011</td>
+                <td>Lixívia 1L (Sonasol)</td>
+                <td>150</td>
+                <td>un</td>
+                <td>0,89</td>
+                <td>23%</td>
+                <td>133,50</td>
+            </tr>
+            <tr>
+                <td>LIM-012</td>
+                <td>Desinfetante Multiusos 750ml (Ajax)</td>
+                <td>100</td>
+                <td>un</td>
+                <td>1,99</td>
+                <td>23%</td>
+                <td>199,00</td>
+            </tr>
+            <tr>
+                <td>LIM-013</td>
+                <td>Sacos Lixo 50L (pack 30) (Glad)</td>
+                <td>80</td>
+                <td>pack</td>
+                <td>2,49</td>
+                <td>23%</td>
+                <td>199,20</td>
+            </tr>
+            <tr>
+                <td>LIM-014</td>
+                <td>Papel Higiénico 3f (pack 12) (Folar)</td>
+                <td>120</td>
+                <td>pack</td>
+                <td>3,75</td>
+                <td>6%</td>
+                <td>450,00</td>
+            </tr>
+            <tr>
+                <td>LIM-015</td>
+                <td>Amaciador Roupa 1,5L (Lenor)</td>
+                <td>60</td>
+                <td>un</td>
+                <td>4,20</td>
+                <td>23%</td>
+                <td>252,00</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="clear"></div>
+    <table class="totals-table">
+        <tr>
+            <td>Subtotal (s/ IVA):</td>
+            <td class="text-right">1.198,16 €</td>
+        </tr>
+        <tr>
+            <td>IVA (6%):</td>
+            <td class="text-right">27,00 €</td>
+        </tr>
+        <tr>
+            <td>IVA (23%):</td>
+            <td class="text-right">239,60 €</td>
+        </tr>
+        <tr class="grand-total">
+            <td>TOTAL:</td>
+            <td class="text-right">1.491,70 €</td>
+        </tr>
+    </table>
+    <div class="clear"></div>
+
+    <div class="footer">
+        <strong>Observações:</strong> Produtos com ficha técnica de segurança obrigatória. Entregar com guia de transporte de mercadorias perigosas.<br>
+        Documento processado por sistema informático.
+    </div>
+</div>
+</body>
+</html>

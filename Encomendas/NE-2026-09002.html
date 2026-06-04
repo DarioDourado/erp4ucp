@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Nota de Encomenda - NE-2026-09002</title>
+    <style>
+        body { font-family: Arial, sans-serif; color: #000; margin: 40px; background: #fff; line-height: 1.4; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 10px; border: 1px solid #eee; }
+        .header-table, .info-table, .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .title { font-size: 24px; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+        .company-details { font-size: 12px; border-bottom: 2px solid #000; padding-bottom: 15px; }
+        .info-section { font-size: 13px; margin-bottom: 20px; }
+        .info-box { border: 1px solid #ccc; padding: 10px; width: 48%; float: left; min-height: 80px; box-sizing: border-box; }
+        .info-box-right { float: right; }
+        .clear { clear: both; }
+        .items-table th { background: #f2f2f2; border: 1px solid #ddd; font-size: 12px; padding: 8px; text-transform: uppercase; }
+        .items-table td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }
+        .totals-table { width: 40%; float: right; border-collapse: collapse; margin-top: 10px; }
+        .totals-table td { padding: 6px; font-size: 13px; border-bottom: 1px solid #eee; }
+        .totals-table .grand-total { font-weight: bold; background: #f2f2f2; border: 1px solid #000; font-size: 15px; }
+        .footer { margin-top: 60px; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px; }
+    </style>
+</head>
+<body>
+<div class="invoice-box">
+    <div class="text-center">
+        <div class="title">NOTA DE ENCOMENDA</div>
+        <div class="company-details">
+            <strong>CERVEJARIA PORTUGUESA, SA</strong><br>
+            Rua da Cerveja, 12, 4400-000 Vila Nova de Gaia<br>
+            NIF: 512345678 | Tel: +351 22 123 4567
+        </div>
+    </div>
+
+    <div class="info-section" style="margin-top:15px;">
+        <div class="info-box">
+            <strong>Cliente:</strong><br>
+            ATLÂNTICO CASH &amp; CARRY, LDA<br>
+            Rua das Indústrias, Lote 8, 4700-000 Braga<br>
+            NIF: 502345671
+        </div>
+        <div class="info-box info-box-right">
+            <strong>Documento Nº:</strong> NE-2026-09002<br>
+            <strong>Data Emissão:</strong> 10/06/2026<br>
+            <strong>Entrega Prevista:</strong> 12/06/2026<br>
+            <strong>Condições Pagamento:</strong> 30 dias
+        </div>
+        <div class="clear"></div>
+    </div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>Código</th>
+                <th>Descrição do Artigo</th>
+                <th>Qtd</th>
+                <th>Un</th>
+                <th>P.Unit (€)</th>
+                <th>IVA</th>
+                <th>Total (€)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>BEB-001</td>
+                <td>Cerveja Super Bock 33cl (pack 24)</td>
+                <td>40</td>
+                <td>pack</td>
+                <td>14,40</td>
+                <td>23%</td>
+                <td>576,00</td>
+            </tr>
+            <tr>
+                <td>BEB-002</td>
+                <td>Vinho Verde Branco 75cl (Casal Garcia)</td>
+                <td>60</td>
+                <td>un</td>
+                <td>3,20</td>
+                <td>23%</td>
+                <td>192,00</td>
+            </tr>
+            <tr>
+                <td>BEB-003</td>
+                <td>Sumo de Laranja 1L (Compal)</td>
+                <td>120</td>
+                <td>un</td>
+                <td>1,85</td>
+                <td>6%</td>
+                <td>222,00</td>
+            </tr>
+            <tr>
+                <td>BEB-004</td>
+                <td>Refrigerante Cola 2L (Continente)</td>
+                <td>80</td>
+                <td>un</td>
+                <td>0,99</td>
+                <td>23%</td>
+                <td>79,20</td>
+            </tr>
+            <tr>
+                <td>BEB-005</td>
+                <td>Água com Gás 1,5L (Pedras)</td>
+                <td>100</td>
+                <td>un</td>
+                <td>0,65</td>
+                <td>6%</td>
+                <td>65,00</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="clear"></div>
+    <table class="totals-table">
+        <tr>
+            <td>Subtotal (s/ IVA):</td>
+            <td class="text-right">948,20 €</td>
+        </tr>
+        <tr>
+            <td>IVA (6%):</td>
+            <td class="text-right">17,22 €</td>
+        </tr>
+        <tr>
+            <td>IVA (23%):</td>
+            <td class="text-right">196,17 €</td>
+        </tr>
+        <tr class="grand-total">
+            <td>TOTAL:</td>
+            <td class="text-right">1.161,59 €</td>
+        </tr>
+    </table>
+    <div class="clear"></div>
+
+    <div class="footer">
+        <strong>Observações:</strong> Entrega no armazém principal. Contactar Sr. Paulo Ferreira (253 222 111) para agendamento.<br>
+        Documento processado por sistema informático.
+    </div>
+</div>
+</body>
+</html>

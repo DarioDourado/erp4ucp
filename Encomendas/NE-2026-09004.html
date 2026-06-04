@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Nota de Encomenda - NE-2026-09004</title>
+    <style>
+        body { font-family: Arial, sans-serif; color: #000; margin: 40px; background: #fff; line-height: 1.4; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 10px; border: 1px solid #eee; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .title { font-size: 24px; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+        .company-details { font-size: 12px; border-bottom: 2px solid #000; padding-bottom: 15px; }
+        .info-section { font-size: 13px; margin-bottom: 20px; }
+        .info-box { border: 1px solid #ccc; padding: 10px; width: 48%; float: left; min-height: 80px; box-sizing: border-box; }
+        .info-box-right { float: right; }
+        .clear { clear: both; }
+        .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .items-table th { background: #f2f2f2; border: 1px solid #ddd; font-size: 12px; padding: 8px; text-transform: uppercase; }
+        .items-table td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }
+        .totals-table { width: 40%; float: right; border-collapse: collapse; margin-top: 10px; }
+        .totals-table td { padding: 6px; font-size: 13px; border-bottom: 1px solid #eee; }
+        .totals-table .grand-total { font-weight: bold; background: #f2f2f2; border: 1px solid #000; font-size: 15px; }
+        .footer { margin-top: 60px; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px; }
+        .alert { background: #fff8e1; border-left: 4px solid #f9a825; padding: 8px 12px; font-size: 12px; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+<div class="invoice-box">
+    <div class="text-center">
+        <div class="title">NOTA DE ENCOMENDA</div>
+        <div class="company-details">
+            <strong>QUEIJARIA SERRANA, SA</strong><br>
+            Rua da Serra da Estrela, 10, 6200-000 Covilhã<br>
+            NIF: 514567890 | Tel: +351 27 567 8901
+        </div>
+    </div>
+
+    <div class="info-section" style="margin-top:15px;">
+        <div class="info-box">
+            <strong>Cliente:</strong><br>
+            ATLÂNTICO CASH &amp; CARRY, LDA<br>
+            Rua das Indústrias, Lote 8, 4700-000 Braga<br>
+            NIF: 502345671
+        </div>
+        <div class="info-box info-box-right">
+            <strong>Documento Nº:</strong> NE-2026-09004<br>
+            <strong>Data Emissão:</strong> 14/06/2026<br>
+            <strong>Entrega Prevista:</strong> 16/06/2026<br>
+            <strong>Condições Pagamento:</strong> 15 dias
+        </div>
+        <div class="clear"></div>
+    </div>
+
+    <div class="alert">⚠ Produtos refrigerados — entrega obrigatória em viatura frigorífica. Temperatura máxima de transporte: 4°C.</div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>Código</th>
+                <th>Descrição do Artigo</th>
+                <th>Qtd</th>
+                <th>Un</th>
+                <th>P.Unit (€)</th>
+                <th>IVA</th>
+                <th>Total (€)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>LAC-001</td>
+                <td>Leite UHT Meio-gordo 1L (Mimosa)</td>
+                <td>300</td>
+                <td>un</td>
+                <td>0,79</td>
+                <td>6%</td>
+                <td>237,00</td>
+            </tr>
+            <tr>
+                <td>LAC-002</td>
+                <td>Iogurte Natural 125g (Activia)</td>
+                <td>200</td>
+                <td>un</td>
+                <td>0,55</td>
+                <td>6%</td>
+                <td>110,00</td>
+            </tr>
+            <tr>
+                <td>LAC-003</td>
+                <td>Manteiga 250g (Presidente)</td>
+                <td>80</td>
+                <td>un</td>
+                <td>2,35</td>
+                <td>6%</td>
+                <td>188,00</td>
+            </tr>
+            <tr>
+                <td>LAC-004</td>
+                <td>Queijo Flamengo fatiado 200g (Saloio)</td>
+                <td>100</td>
+                <td>un</td>
+                <td>1,99</td>
+                <td>6%</td>
+                <td>199,00</td>
+            </tr>
+            <tr>
+                <td>LAC-005</td>
+                <td>Natas para Culinária 200ml (Parmalat)</td>
+                <td>150</td>
+                <td>un</td>
+                <td>0,89</td>
+                <td>6%</td>
+                <td>133,50</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="clear"></div>
+    <table class="totals-table">
+        <tr>
+            <td>Subtotal (s/ IVA):</td>
+            <td class="text-right">820,28 €</td>
+        </tr>
+        <tr>
+            <td>IVA (6%):</td>
+            <td class="text-right">51,22 €</td>
+        </tr>
+        <tr class="grand-total">
+            <td>TOTAL:</td>
+            <td class="text-right">871,50 €</td>
+        </tr>
+    </table>
+    <div class="clear"></div>
+
+    <div class="footer">
+        <strong>Observações:</strong> Verificar validades no momento da entrega. Produtos fora de prazo ou danificados não serão aceites.<br>
+        Documento processado por sistema informático.
+    </div>
+</div>
+</body>
+</html>

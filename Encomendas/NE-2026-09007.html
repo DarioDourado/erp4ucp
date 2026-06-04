@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Nota de Encomenda - NE-2026-09007</title>
+    <style>
+        body { font-family: Arial, sans-serif; color: #000; margin: 40px; background: #fff; line-height: 1.4; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 10px; border: 1px solid #eee; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .title { font-size: 24px; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+        .company-details { font-size: 12px; border-bottom: 2px solid #000; padding-bottom: 15px; }
+        .info-section { font-size: 13px; margin-bottom: 20px; }
+        .info-box { border: 1px solid #ccc; padding: 10px; width: 48%; float: left; min-height: 80px; box-sizing: border-box; }
+        .info-box-right { float: right; }
+        .clear { clear: both; }
+        .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .items-table th { background: #f2f2f2; border: 1px solid #ddd; font-size: 12px; padding: 8px; text-transform: uppercase; }
+        .items-table td { border: 1px solid #ddd; padding: 8px; font-size: 13px; }
+        .totals-table { width: 40%; float: right; border-collapse: collapse; margin-top: 10px; }
+        .totals-table td { padding: 6px; font-size: 13px; border-bottom: 1px solid #eee; }
+        .totals-table .grand-total { font-weight: bold; background: #f2f2f2; border: 1px solid #000; font-size: 15px; }
+        .footer { margin-top: 60px; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px; }
+    </style>
+</head>
+<body>
+<div class="invoice-box">
+    <div class="text-center">
+        <div class="title">NOTA DE ENCOMENDA</div>
+        <div class="company-details">
+            <strong>ARMAZÉNS DO VOUGA, LDA</strong><br>
+            Rua da Indústria, 88, 3700-000 São João da Madeira<br>
+            NIF: 517890123 | Tel: +351 25 901 2345
+        </div>
+    </div>
+
+    <div class="info-section" style="margin-top:15px;">
+        <div class="info-box">
+            <strong>Cliente:</strong><br>
+            ATLÂNTICO CASH &amp; CARRY, LDA<br>
+            Rua das Indústrias, Lote 8, 4700-000 Braga<br>
+            NIF: 502345671
+        </div>
+        <div class="info-box info-box-right">
+            <strong>Documento Nº:</strong> NE-2026-09007<br>
+            <strong>Data Emissão:</strong> 15/06/2026<br>
+            <strong>Entrega Prevista:</strong> 18/06/2026<br>
+            <strong>Condições Pagamento:</strong> 30 dias
+        </div>
+        <div class="clear"></div>
+    </div>
+
+    <table class="items-table">
+        <thead>
+            <tr>
+                <th>Código</th>
+                <th>Descrição do Artigo</th>
+                <th>Qtd</th>
+                <th>Un</th>
+                <th>P.Unit (€)</th>
+                <th>IVA</th>
+                <th>Total (€)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>CON-001</td>
+                <td>Tomate Pelado 400g (Guloso)</td>
+                <td>200</td>
+                <td>un</td>
+                <td>0,75</td>
+                <td>6%</td>
+                <td>150,00</td>
+            </tr>
+            <tr>
+                <td>CON-002</td>
+                <td>Feijão Encarnado 400g (Compal)</td>
+                <td>150</td>
+                <td>un</td>
+                <td>0,89</td>
+                <td>6%</td>
+                <td>133,50</td>
+            </tr>
+            <tr>
+                <td>CON-003</td>
+                <td>Grão de Bico cozido 400g (Valouro)</td>
+                <td>150</td>
+                <td>un</td>
+                <td>0,92</td>
+                <td>6%</td>
+                <td>138,00</td>
+            </tr>
+            <tr>
+                <td>CON-004</td>
+                <td>Massa Esparguete 500g (Milaneza)</td>
+                <td>250</td>
+                <td>un</td>
+                <td>0,69</td>
+                <td>6%</td>
+                <td>172,50</td>
+            </tr>
+            <tr>
+                <td>CON-005</td>
+                <td>Azeite Virgem Extra 750ml (Gallo)</td>
+                <td>100</td>
+                <td>un</td>
+                <td>5,49</td>
+                <td>6%</td>
+                <td>549,00</td>
+            </tr>
+            <tr>
+                <td>CON-006</td>
+                <td>Vinagre de Vinho 750ml (Ventura)</td>
+                <td>80</td>
+                <td>un</td>
+                <td>0,99</td>
+                <td>23%</td>
+                <td>79,20</td>
+            </tr>
+            <tr>
+                <td>CON-007</td>
+                <td>Sal Refinado 1kg (Vatel)</td>
+                <td>200</td>
+                <td>un</td>
+                <td>0,45</td>
+                <td>6%</td>
+                <td>90,00</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="clear"></div>
+    <table class="totals-table">
+        <tr>
+            <td>Subtotal (s/ IVA):</td>
+            <td class="text-right">1.124,47 €</td>
+        </tr>
+        <tr>
+            <td>IVA (6%):</td>
+            <td class="text-right">74,58 €</td>
+        </tr>
+        <tr>
+            <td>IVA (23%):</td>
+            <td class="text-right">18,22 €</td>
+        </tr>
+        <tr class="grand-total">
+            <td>TOTAL:</td>
+            <td class="text-right">1.312,20 €</td>
+        </tr>
+    </table>
+    <div class="clear"></div>
+
+    <div class="footer">
+        <strong>Observações:</strong> Indicar referência NE-2026-09007 em todos os documentos de transporte e fatura.<br>
+        Documento processado por sistema informático.
+    </div>
+</div>
+</body>
+</html>

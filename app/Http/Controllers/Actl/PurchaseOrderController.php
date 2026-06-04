@@ -2296,9 +2296,9 @@ class PurchaseOrderController extends Controller
             return '';
         }
 
-        // 12. Limita a 100 caracteres
-        if (mb_strlen($value) > 100) {
-            $value = mb_substr($value, 0, 100);
+        // 12. Limita a 200 caracteres; se exceder, corta para 197 e acrescenta "..."
+        if (mb_strlen($value) > 200) {
+            $value = mb_substr($value, 0, 197) . '...';
         }
 
         $result = trim($value);

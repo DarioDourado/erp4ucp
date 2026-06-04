@@ -18,12 +18,6 @@
                 <div class="card">
                     <div class="card-body">
 
-                        <a href="{{ route('goodsReceipt.ocr') }}"
-                           class="btn btn-primary btn-rounded waves-effect waves-light me-2"
-                           style="float: right;">
-                            <i class="fas fa-magic"></i> Entrada por OCR
-                        </a>
-
                         <a href="{{ route('goodsReceipt.add') }}"
                            class="btn btn-secondary btn-rounded waves-effect waves-light"
                            style="float: right;">

@@ -78,6 +78,6 @@ class OCRTestDataSeeder extends Seeder
         echo "  - Fornecedor: {$supplier->name} (Código: {$supplier->code})\n";
         echo "  - Encomenda: {$purchaseOrder->pONumber}\n";
         echo "  - Linhas: " . count($poLines) . "\n";
-        echo "\nAceda a: /goodsReceipt/ocr\n";
+        echo "\nDados de teste disponíveis.\n";
     }
 }
