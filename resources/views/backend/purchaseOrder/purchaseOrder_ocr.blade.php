@@ -338,16 +338,27 @@
 
         if (lines.length > 0) {
             readHTML += `
-                <h6 class="mb-2">Linhas Extraídas (${lines.length})</h6>
+                <h6 class="mb-2">Linhas Extraídas (<span id="read-line-count">${lines.length}</span>)</h6>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <small class="text-muted">
+                        <span id="selected-lines-count">${lines.length}</span> de ${lines.length} linhas selecionadas
+                    </small>
+                    <div>
+                        <button type="button" id="select-all-read-btn" class="btn btn-sm btn-outline-secondary">Selecionar Todas</button>
+                        <button type="button" id="deselect-all-read-btn" class="btn btn-sm btn-outline-secondary">Nenhuma</button>
+                    </div>
+                </div>
                 <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
                     <table class="table table-sm table-bordered small mb-0">
                         <thead class="table-light sticky-top">
                             <tr>
-                                <th style="width: 15%;">Cód. Artigo</th>
-                                <th style="width: 35%;">Descrição</th>
-                                <th class="text-end" style="width: 15%;">Qtd</th>
-                                <th class="text-end" style="width: 15%;">Preço Unit.</th>
-                                <th class="text-end" style="width: 20%;">Valor Total</th>
+                                <th style="width:5%;"><input type="checkbox" id="select-all-lines-read" checked></th>
+                                <th style="width: 12%;">Cód. Artigo</th>
+                                <th style="width: 28%;">Descrição</th>
+                                <th class="text-end" style="width: 9%;">Qtd</th>
+                                <th class="text-end" style="width: 11%;">Preço Unit.</th>
+                                <th class="text-end" style="width: 8%;">Taxa IVA</th>
+                                <th class="text-end" style="width: 27%;">Valor Total</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -361,13 +372,18 @@
                 const desc = line.description || line.productDescription || '<span class="text-muted fst-italic">(sem descrição)</span>';
                 const badgeClass = line.found ? 'bg-success' : 'bg-warning text-dark';
                 const badgeText = line.found ? '' : 'Novo';
+                const checked = line.enabled !== false ? 'checked' : '';
+                const taxRate = line.taxRate || line.vatRate || null;
+                const taxRateText = taxRate != null ? (parseFloat(taxRate).toFixed(0) + '%') : '-';
 
                 readHTML += `
                     <tr>
+                        <td class="text-center"><input type="checkbox" class="line-selector-read" data-index="${index}" ${checked}></td>
                         <td><code>${code}</code>${!line.found ? ` <span class="badge ${badgeClass} ms-1" style="font-size:0.6rem;">${badgeText}</span>` : ''}</td>
                         <td>${desc}</td>
                         <td class="text-end">${qty.toLocaleString('pt-PT', { minimumFractionDigits: 0, maximumFractionDigits: 3 })}</td>
                         <td class="text-end">${price > 0 ? price.toFixed(2) + ' €' : '-'}</td>
+                        <td class="text-end">${taxRateText}</td>
                         <td class="text-end">${total > 0 ? total + ' €' : '-'}</td>
                     </tr>
                 `;
@@ -384,6 +400,43 @@
                     <small>Nenhuma linha de artigo encontrada no documento.</small>
                 </div>
             `;
+        }
+
+        // ── Validation card (subtotal/total cross-validation) ──
+        const validation = enriched.validation || {};
+        if (validation.subtotal || validation.total) {
+            readHTML += `<div class="card bg-light mt-3"><div class="card-body py-2">`;
+            const hasWarning = (validation.subtotal && validation.subtotal.status !== 'ok') ||
+                               (validation.total && validation.total.status !== 'ok');
+            const hasError = (validation.subtotal && validation.subtotal.status === 'error') ||
+                             (validation.total && validation.total.status === 'error');
+            const statusIcon = hasError ? '🔴' : (hasWarning ? '⚠️' : '✅');
+            const statusText = hasError ? 'Discrepância detetada — reveja os dados manualmente' :
+                               (hasWarning ? 'Pequena discrepância nos totais' : 'Validação de Totais');
+            const alertClass = hasError ? 'alert-danger' : (hasWarning ? 'alert-warning' : 'alert-success');
+
+            readHTML += `<div class="alert ${alertClass} py-2 mb-2"><strong>${statusIcon} ${statusText}</strong></div>`;
+
+            if (validation.subtotal) {
+                const s = validation.subtotal;
+                readHTML += `
+                    <table class="table table-sm small mb-0">
+                        <tr><th style="width:40%;">Subtotal Documento</th><td>${s.extracted.toFixed(2)} €</td></tr>
+                        <tr><th>Subtotal Calculado</th><td>${s.calculated.toFixed(2)} €</td></tr>
+                        <tr><th>Diferença</th><td>${s.discrepancy.toFixed(2)} € (${s.discrepancyPercent.toFixed(1)}%)</td></tr>
+                    </table>`;
+            }
+            if (validation.total) {
+                const t = validation.total;
+                readHTML += `
+                    <table class="table table-sm small mb-0">
+                        <tr><th style="width:40%;">Total Documento</th><td>${t.extracted.toFixed(2)} €</td></tr>
+                        <tr><th>Total Calculado</th><td>${t.calculated.toFixed(2)} €</td></tr>
+                        <tr><th>Diferença</th><td>${t.discrepancy.toFixed(2)} € (${t.discrepancyPercent.toFixed(1)}%)</td></tr>
+                    </table>`;
+            }
+
+            readHTML += `</div></div>`;
         }
 
         readHTML += `</div>`;
@@ -424,22 +477,36 @@
         if (lines.length > 0) {
             editHTML += `
                 <h6 class="mb-2">Linhas</h6>
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <small class="text-muted">
+                        <span id="edit-selected-lines-count">${lines.filter(l => l.enabled !== false).length}</span> de ${lines.length} linhas selecionadas
+                    </small>
+                    <div>
+                        <button type="button" id="select-all-edit-btn" class="btn btn-sm btn-outline-secondary">Selecionar Todas</button>
+                        <button type="button" id="deselect-all-edit-btn" class="btn btn-sm btn-outline-secondary">Nenhuma</button>
+                    </div>
+                </div>
                 <div class="table-responsive">
                     <table class="table table-sm table-bordered small mb-0">
                         <thead class="table-light">
                             <tr>
+                                <th style="width:5%;"><input type="checkbox" id="select-all-lines-edit" checked></th>
                                 <th>Artigo</th>
                                 <th>Descrição</th>
                                 <th class="text-end">Qtd</th>
                                 <th class="text-end">Preço Unit.</th>
+                                <th class="text-end">Taxa IVA</th>
                             </tr>
                         </thead>
                         <tbody>
             `;
 
             lines.forEach((line, index) => {
+                const checked = line.enabled !== false ? 'checked' : '';
+                const taxRate = line.taxRate || line.vatRate || '';
                 editHTML += `
                     <tr>
+                        <td class="text-center"><input type="checkbox" class="line-selector-edit" data-index="${index}" ${checked}></td>
                         <td><input type="text" class="form-control form-control-sm edit-line-code"
                                    value="${line.productCode || ''}" data-index="${index}"></td>
                         <td><input type="text" class="form-control form-control-sm edit-line-desc"
@@ -449,6 +516,8 @@
                                    data-index="${index}"></td>
                         <td><input type="number" step="0.01" class="form-control form-control-sm text-end edit-line-price"
                                    value="${Number(line.unitPrice).toFixed(2)}" data-index="${index}"></td>
+                        <td><input type="number" step="0.1" class="form-control form-control-sm text-end edit-line-tax"
+                                   value="${Number(taxRate || 0).toFixed(0)}" data-index="${index}"></td>
                     </tr>
                 `;
             });
@@ -479,9 +548,13 @@
 
         document.getElementById('save-ocr-btn').addEventListener('click', saveEditedData);
 
+        // ── Checkbox event handlers: read view ──
+        setupCheckboxHandlers(lines.length);
+
         // Preencher sumário da secção de redirecionamento
         const linesCreated = lines.filter(l => !l.found).length;
         const linesExisting = lines.filter(l => l.found).length;
+        const linesEnabled = lines.filter(l => l.enabled !== false).length;
         const supplierStatus = supplier.found ? 'Fornecedor existente' : 'Fornecedor criado';
 
         document.getElementById('ocr-summary').innerHTML = `
@@ -493,13 +566,13 @@
                             <small class="text-muted">${supplierStatus}</small>
                         </div>
                         <div class="col-md-4">
-                            <strong>${lines.length} linha(s)</strong><br>
+                            <strong><span id="summary-selected-count">${linesEnabled}</span> de ${lines.length} linha(s) selecionadas</strong><br>
                             <small class="text-muted">
-                                ${linesExisting} existente(s), ${linesCreated} criada(s)
+                                ${linesExisting} existente(s), ${linesCreated} nova(s)
                             </small>
                         </div>
                         <div class="col-md-4 text-md-end">
-                            <span class="badge bg-success fs-6">
+                            <span class="badge bg-success fs-6" id="summary-status-badge">
                                 <i class="fas fa-check"></i> Pronto
                             </span>
                         </div>
@@ -512,6 +585,149 @@
         const createBtn = document.getElementById('create-po-btn');
         if (supplier.code) {
             createBtn.href = '{{ route("purchaseOrder.add") }}?supplier_code=' + encodeURIComponent(supplier.code);
+        }
+
+        updateCreateButtonState();
+    }
+
+    function setupCheckboxHandlers(lineCount) {
+        // Read view selectors
+        const selectAllRead = document.getElementById('select-all-lines-read');
+        const selectAllReadBtn = document.getElementById('select-all-read-btn');
+        const deselectAllReadBtn = document.getElementById('deselect-all-read-btn');
+
+        if (selectAllRead) {
+            selectAllRead.addEventListener('change', function () {
+                document.querySelectorAll('.line-selector-read').forEach(cb => cb.checked = this.checked);
+                updateEnabledStateFromRead();
+            });
+        }
+
+        if (selectAllReadBtn) selectAllReadBtn.addEventListener('click', function () {
+            document.querySelectorAll('.line-selector-read').forEach(cb => cb.checked = true);
+            if (selectAllRead) selectAllRead.checked = true;
+            updateEnabledStateFromRead();
+        });
+
+        if (deselectAllReadBtn) deselectAllReadBtn.addEventListener('click', function () {
+            document.querySelectorAll('.line-selector-read').forEach(cb => cb.checked = false);
+            if (selectAllRead) selectAllRead.checked = false;
+            updateEnabledStateFromRead();
+        });
+
+        document.querySelectorAll('.line-selector-read').forEach(cb => {
+            cb.addEventListener('change', updateEnabledStateFromRead);
+        });
+
+        // Edit view selectors
+        const selectAllEdit = document.getElementById('select-all-lines-edit');
+        const selectAllEditBtn = document.getElementById('select-all-edit-btn');
+        const deselectAllEditBtn = document.getElementById('deselect-all-edit-btn');
+
+        if (selectAllEdit) {
+            selectAllEdit.addEventListener('change', function () {
+                document.querySelectorAll('.line-selector-edit').forEach(cb => cb.checked = this.checked);
+                updateEnabledStateFromEdit();
+            });
+        }
+
+        if (selectAllEditBtn) selectAllEditBtn.addEventListener('click', function () {
+            document.querySelectorAll('.line-selector-edit').forEach(cb => cb.checked = true);
+            if (selectAllEdit) selectAllEdit.checked = true;
+            updateEnabledStateFromEdit();
+        });
+
+        if (deselectAllEditBtn) deselectAllEditBtn.addEventListener('click', function () {
+            document.querySelectorAll('.line-selector-edit').forEach(cb => cb.checked = false);
+            if (selectAllEdit) selectAllEdit.checked = false;
+            updateEnabledStateFromEdit();
+        });
+
+        document.querySelectorAll('.line-selector-edit').forEach(cb => {
+            cb.addEventListener('change', updateEnabledStateFromEdit);
+        });
+    }
+
+    function getEnabledStateFromRead() {
+        const enabled = [];
+        document.querySelectorAll('.line-selector-read').forEach(cb => {
+            enabled[parseInt(cb.dataset.index)] = cb.checked;
+        });
+        return enabled;
+    }
+
+    function getEnabledStateFromEdit() {
+        const enabled = [];
+        document.querySelectorAll('.line-selector-edit').forEach(cb => {
+            enabled[parseInt(cb.dataset.index)] = cb.checked;
+        });
+        return enabled;
+    }
+
+    function updateUIEnabledCounts(count) {
+        document.getElementById('selected-lines-count').textContent = count;
+        const editCount = document.getElementById('edit-selected-lines-count');
+        if (editCount) editCount.textContent = count;
+        const summaryCount = document.getElementById('summary-selected-count');
+        if (summaryCount) summaryCount.textContent = count;
+    }
+
+    async function syncEnabledState(enabledArray) {
+        const lines = [];
+        for (let i = 0; i < enabledArray.length; i++) {
+            lines.push({ enabled: enabledArray[i] !== false });
+        }
+
+        try {
+            await fetch('{{ route("purchaseOrder.updateOCRData", [], false) }}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
+                },
+                body: JSON.stringify({ lines: lines }),
+            });
+        } catch (error) {
+            console.error('Erro ao sincronizar estado das linhas:', error);
+        }
+    }
+
+    async function updateEnabledStateFromRead() {
+        if (!ocrResultData || !ocrResultData.enriched || !ocrResultData.enriched.lines) return;
+        const enabled = getEnabledStateFromRead();
+        for (let i = 0; i < ocrResultData.enriched.lines.length; i++) {
+            ocrResultData.enriched.lines[i].enabled = enabled[i] !== false;
+        }
+        const enabledCount = enabled.filter(Boolean).length;
+        updateUIEnabledCounts(enabledCount);
+        updateCreateButtonState();
+        await syncEnabledState(enabled);
+    }
+
+    async function updateEnabledStateFromEdit() {
+        if (!ocrResultData || !ocrResultData.enriched || !ocrResultData.enriched.lines) return;
+        const enabled = getEnabledStateFromEdit();
+        for (let i = 0; i < ocrResultData.enriched.lines.length; i++) {
+            ocrResultData.enriched.lines[i].enabled = enabled[i] !== false;
+        }
+        const enabledCount = enabled.filter(Boolean).length;
+        updateUIEnabledCounts(enabledCount);
+        updateCreateButtonState();
+        await syncEnabledState(enabled);
+    }
+
+    function updateCreateButtonState() {
+        if (!ocrResultData || !ocrResultData.enriched || !ocrResultData.enriched.lines) return;
+        const enabledCount = ocrResultData.enriched.lines.filter(l => l.enabled !== false).length;
+        const createBtn = document.getElementById('create-po-btn');
+        if (createBtn) {
+            if (enabledCount === 0) {
+                createBtn.classList.add('disabled');
+                createBtn.style.pointerEvents = 'none';
+            } else {
+                createBtn.classList.remove('disabled');
+                createBtn.style.pointerEvents = '';
+            }
         }
     }
 
@@ -532,11 +748,14 @@
             const lines = [];
             lineInputs.forEach((input) => {
                 const index = input.dataset.index;
+                const cb = document.querySelector(`.line-selector-edit[data-index="${index}"]`);
                 lines.push({
                     productCode: input.value.trim(),
                     description: document.querySelector(`.edit-line-desc[data-index="${index}"]`).value.trim(),
                     quantity: parseFloat(document.querySelector(`.edit-line-qty[data-index="${index}"]`).value) || 0,
                     unitPrice: parseFloat(document.querySelector(`.edit-line-price[data-index="${index}"]`).value) || 0,
+                    taxRate: parseFloat(document.querySelector(`.edit-line-tax[data-index="${index}"]`).value) || 0,
+                    enabled: cb ? cb.checked : true,
                 });
             });
 

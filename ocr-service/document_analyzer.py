@@ -36,6 +36,7 @@ Total: Total/Valor/Import./Líquido
 VAT: IVA/Taxa/%
 Unit: Un./UN/Unidade/Medida
 If no header, infer from data pattern. Different suppliers = different column orders.
+IMPORTANT: For each line, extract the VAT/tax rate (IVA column value like 6%, 13%, 23%) into the taxRate field.
 
 SUPPLIER: Look near "FORNECEDOR:", "Fornecedor", "Cliente:". NIF = 9 digits (from NIF:/NIPC:/Contribuinte:). Date → YYYY-MM-DD.
 
@@ -59,17 +60,16 @@ ENCOMENDA Nº 2025/058 | FORNECEDOR: Distribuidora Lusitânia, Lda | NIF: 500123
 1001  Arroz Agulha  20  1,15
 1002  Massa Espiral  24  0,79
 
-Output: {"supplier":{"name":"Distribuidora Lusitânia, Lda","nif":"500123456","address":null},"documentDate":"2025-05-20","documentNumber":"2025/058","lines":[{"productCode":"1001","productDescription":"Arroz Agulha","quantity":20.0,"unitPrice":1.15,"unit":null},{"productCode":"1002","productDescription":"Massa Espiral","quantity":24.0,"unitPrice":0.79,"unit":null}],"totalNet":null,"totalGross":null}
+Output: {"supplier":{"name":"Distribuidora Lusitânia, Lda","nif":"500123456","address":null},"documentDate":"2025-05-20","documentNumber":"2025/058","lines":[{"productCode":"1001","productDescription":"Arroz Agulha","quantity":20.0,"unitPrice":1.15,"unit":null,"taxRate":null},{"productCode":"1002","productDescription":"Massa Espiral","quantity":24.0,"unitPrice":0.79,"unit":null,"taxRate":null}],"totalNet":null,"totalGross":null}
 
-Example 2 (table with headers Ref./Designação/Quant./Pr. Unit./Valor):
+Example 2 (table with headers Ref./Designação/Quant./Pr. Unit./IVA/Valor):
 Input:
-Fornecedor: Frutaria do Largo, Lda | NIF: 512345678 | Data: 10/05/2025 | Encomenda Nº: 2025/042
-Ref.  Designação           Quant.  Pr. Unit.  Valor
-0088  Maçã Golden 20KG     8       12,50      100,00
-0099  Pêra Rocha 10KG      15      8,75       131,25
-Total Líquido: 281,00
+Fornecedor: Cervejaria Portuguesa, SA | NIF: 512345678 | Data: 10/06/2026 | Encomenda Nº: NE-2026-09002
+Código  Descrição do Artigo                     Qtd  Un  P.Unit (€)  IVA  Total (€)
+BEB-001 Cerveja Super Bock 33cl (pack 24)      40   pack 14,40       23%  576,00
+BEB-002 Vinho Verde Branco 75cl (Casal Garcia)  60   un   3,20        23%  192,00
 
-Output: {"supplier":{"name":"Frutaria do Largo, Lda","nif":"512345678","address":null},"documentDate":"2025-05-10","documentNumber":"2025/042","lines":[{"productCode":"0088","productDescription":"Maçã Golden 20KG","quantity":8.0,"unitPrice":12.50,"unit":"KG"},{"productCode":"0099","productDescription":"Pêra Rocha 10KG","quantity":15.0,"unitPrice":8.75,"unit":"KG"}],"totalNet":281.00,"totalGross":null}
+Output: {"supplier":{"name":"Cervejaria Portuguesa, SA","nif":"512345678","address":null},"documentDate":"2026-06-10","documentNumber":"NE-2026-09002","lines":[{"productCode":"BEB-001","productDescription":"Cerveja Super Bock 33cl (pack 24)","quantity":40.0,"unitPrice":14.40,"unit":"pack","taxRate":23.0},{"productCode":"BEB-002","productDescription":"Vinho Verde Branco 75cl (Casal Garcia)","quantity":60.0,"unitPrice":3.20,"unit":"un","taxRate":23.0}],"totalNet":null,"totalGross":null}
 
 Example 3 (bracket/pipe format: CODE [DESC | QTY[unit] PRICE] VAT% | TOTAL):
 Input:
@@ -77,15 +77,16 @@ Input:
 0344 [Tomate Chucha Amad. 25KG | 25[KG| 1,85] 6% | 46,25|
 0551 Salsa Frisada Molho 20] UN 6%
 
-Output: {"supplier":null,"lines":[{"productCode":"0122","productDescription":"Batata Monalisa Sac 10kg","quantity":5.0,"unitPrice":8.60,"unit":"CX"},{"productCode":"0344","productDescription":"Tomate Chucha Amad. 25KG","quantity":25.0,"unitPrice":1.85,"unit":"KG"},{"productCode":"0551","productDescription":"Salsa Frisada Molho","quantity":20.0,"unitPrice":null,"unit":"UN"}]}
+Output: {"supplier":null,"lines":[{"productCode":"0122","productDescription":"Batata Monalisa Sac 10kg","quantity":5.0,"unitPrice":8.60,"unit":"CX","taxRate":6.0},{"productCode":"0344","productDescription":"Tomate Chucha Amad. 25KG","quantity":25.0,"unitPrice":1.85,"unit":"KG","taxRate":6.0},{"productCode":"0551","productDescription":"Salsa Frisada Molho","quantity":20.0,"unitPrice":null,"unit":"UN","taxRate":6.0}]}
 
 KEY RULES:
 - Identify column headers FIRST, then map data columns. Different suppliers use different column orders.
 - \"Qtd Enc\" = quantity ordered (use this); \"Qtd Ent\" = delivered (ignore).
-- The row-end \"Total\" column is NOT unit price. Skip VAT rates (6%, 13%, 23%).
+- The row-end \"Total\" column is NOT unit price. Skip VAT rates (6%, 13%, 23%) as unit prices but EXTRACT them into the taxRate field.
 - Extract unit from hints: Cx→CX, Kg→KG, Un→UN, Sac→KG, Molho→MOLHO, L→L, Ml→ML.
 - Portuguese comma = decimal (1,15=1.15). Thousands use dot (1.000=1000).
 - Extract ALL product lines. Never include header/divider/summary rows.
+- Every line item MUST include taxRate (float or null). IVA column values (6%, 13%, 23%) → taxRate field.
 - Return ONLY valid JSON, no markdown or extra text."""
 
 
@@ -224,9 +225,17 @@ OCR Text:
             for i, line in enumerate(fallback_doc.lines[:5]):
                 logger.info(f"DIAGNOSTIC FB line[{i}]: code={line.get('productCode')}, desc={line.get('productDescription')}, qty={line.get('quantity')}, price={line.get('unitPrice')}")
 
-            if fb_lines > llm_lines or fb_prices > llm_prices:
+            # Prefer LLM result — it's more accurate at extracting structured data.
+            # Only use fallback if LLM clearly failed (0 lines, no supplier, no document number, no prices).
+            llm_failed = (
+                llm_lines == 0
+                or not doc.supplier.get('name')
+                or not doc.documentNumber
+                or llm_prices == 0
+            )
+            if llm_failed:
                 logger.warning(
-                    f"Preferring fallback result over LLM "
+                    f"LLM result appears incomplete, preferring fallback "
                     f"(LLM: {llm_lines} lines / {llm_prices} prices, "
                     f"Fallback: {fb_lines} lines / {fb_prices} prices)"
                 )
@@ -293,12 +302,14 @@ def _convert_to_parsed_document(data: dict) -> ParsedDocument:
         if isinstance(line, dict):
             raw_desc = str(line.get("productDescription") or "").strip()
             raw_unit = str(line.get("unit") or "").strip().upper()
+            raw_tax = line.get("taxRate")
             cleaned_line = {
                 "productCode": str(line.get("productCode") or "").strip() or None,
                 "productDescription": _clean_description(raw_desc) or None,
                 "quantity": _to_float(line.get("quantity")),
                 "unitPrice": _to_float(line.get("unitPrice")),
                 "unit": raw_unit or None,
+                "taxRate": _to_float(raw_tax) if raw_tax is not None else None,
             }
             if cleaned_line["productDescription"] or cleaned_line["productCode"]:
                 doc.lines.append(cleaned_line)
@@ -429,6 +440,12 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
     data_clean = re.sub(r'\]', ' ', data_clean)
     # Remove pipe separators
     data_clean = re.sub(r'\|', ' ', data_clean)
+    # Extract VAT percentage from raw data (ex: "6%", "13%")
+    tax_rate = None
+    vat_pct = re.search(r'\b(\d{1,2})\s*%', data_raw)
+    if vat_pct:
+        tax_rate = float(vat_pct.group(1))
+
     # Remove trailing parenthesis and percent signs
     data_clean = re.sub(r'[\)%]', '', data_clean)
 
@@ -442,6 +459,7 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
                 "quantity": _to_float(numbers_raw[0]),
                 "unitPrice": None,
                 "unit": unit,
+                "taxRate": tax_rate,
             }
         return None
 
@@ -485,6 +503,7 @@ def _parse_bracket_pipe_line(line: str) -> dict | None:
         "quantity": qty if isinstance(qty, (int, float)) else _to_float(qty),
         "unitPrice": price if isinstance(price, (int, float)) else _to_float(price),
         "unit": unit,
+        "taxRate": tax_rate,
     }
 
 
@@ -648,6 +667,7 @@ def _parse_data_line_with_columns(
         "quantity": None,
         "unitPrice": None,
         "unit": None,
+        "taxRate": None,
     }
 
     # ── Detect unit from tokens (before description parsing) ──
@@ -656,6 +676,14 @@ def _parse_data_line_with_columns(
         upper = token.strip('[]|()').upper()
         if upper in unit_keywords:
             result["unit"] = upper
+            break
+
+    # ── Extract VAT by scanning all tokens for % pattern ──
+    # (header column index is unreliable because descriptions span variable tokens)
+    for token in tokens:
+        vat_match = re.match(r'^(\d{1,2})\s*%$', token)
+        if vat_match:
+            result["taxRate"] = float(vat_match.group(1))
             break
 
     # ── Extract code (first token if it matches code pattern) ──
@@ -1016,6 +1044,12 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
         # ── Legacy parsers below (for documents without detectable headers) ──
         line_clean = line.replace('€', '').replace(',', '.').strip()
 
+        # Extract VAT from the raw line before cleaning
+        legacy_tax_rate = None
+        vat_pct_legacy = re.search(r'\b(\d{1,2})\s*%', line)
+        if vat_pct_legacy:
+            legacy_tax_rate = float(vat_pct_legacy.group(1))
+
         code_m = re.match(r'^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)?)\s+', line_clean)
         if code_m:
             code = code_m.group(1)
@@ -1072,6 +1106,7 @@ def _fallback_parse(ocr_text: str) -> ParsedDocument:
                             "productDescription": _clean_description(desc),
                             "quantity": _to_float(qty_str),
                             "unitPrice": _to_float(price_str),
+                            "taxRate": legacy_tax_rate,
                         })
                         continue
 

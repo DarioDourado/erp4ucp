@@ -61,7 +61,6 @@ class PurchaseOrderController extends Controller
     {
         $suppliers = $this->getSuppliers();
         $families = $this->getFamilies();
-        $products = $this->getProductsForForm();
         $nextPONumber = ((int) PurchaseOrderC::max('pONumber')) + 1;
 
         // --- OCR pre-fill: verificar se há dados de OCR em sessão ---
@@ -70,8 +69,44 @@ class PurchaseOrderController extends Controller
         $initialLines = $this->normalizeLinesForForm(collect(old('lines', [])));
 
         if ($ocrData && empty(old())) {
-            $ocrSupplierCode = $ocrData['supplier']['code'] ?? $ocrSupplierCode;
-            $initialLines = collect($ocrData['lines'] ?? [])
+            // Ensure products and supplier exist in DB before showing the form
+            // The add form JS requires product codes to exist in the product index
+            $parsedForCreation = [
+                'supplier' => [
+                    'nome' => $ocrData['supplier']['name'] ?? '',
+                    'nif' => $ocrData['supplier']['nif'] ?? '',
+                    'morada' => '',
+                ],
+                'lines' => array_map(function ($line) {
+                    return [
+                        'codigo' => $line['productCode'] ?? ($line['ocrRaw']['codigo'] ?? ''),
+                        'descricao' => $line['description'] ?? ($line['ocrRaw']['descricao'] ?? ''),
+                        'quantidade' => $line['quantity'] ?? 1,
+                        'precoUnitario' => $line['unitPrice'] ?? 0,
+                        'unidade' => $line['productUnit'] ?? ($line['ocrRaw']['unidade'] ?? null),
+                        'iva' => $line['taxRate'] ?? ($line['ocrRaw']['iva'] ?? null),
+                    ];
+                }, array_filter($ocrData['lines'] ?? [], function ($line) {
+                    return ($line['enabled'] ?? true) !== false;
+                })),
+            ];
+            $enriched = $this->enrichPurchaseOrderDataWithDatabase($parsedForCreation, 'add-resolve', true);
+
+            $ocrSupplierCode = $enriched['supplier']['code'] ?? $ocrSupplierCode;
+
+            // Mapear fornecedor por NIF: se já existe um fornecedor com o NIF do OCR, assume esse
+            $ocrNif = $ocrData['supplier']['nif'] ?? null;
+            if (!empty($ocrNif)) {
+                $supplierByNif = Supplier::where('nif', $ocrNif)->first();
+                if ($supplierByNif) {
+                    $ocrSupplierCode = (string) $supplierByNif->code;
+                }
+            }
+
+            $initialLines = collect($enriched['lines'] ?? [])
+                ->filter(function ($line) {
+                    return ($line['enabled'] ?? true) !== false;
+                })
                 ->map(function ($line) {
                     return [
                         'productCode' => (string) ($line['productCode'] ?? ''),
@@ -81,6 +116,10 @@ class PurchaseOrderController extends Controller
                 })
                 ->values();
         }
+
+        // Re-fetch products after potential OCR creation, so newly created
+        // products are available in the form's product picker JS
+        $products = $this->getProductsForForm();
 
         return view('backend.purchaseOrder.purchaseOrderC_add', compact(
             'suppliers',
@@ -94,6 +133,31 @@ class PurchaseOrderController extends Controller
 
     public function PurchaseOrderStore(Request $request)
     {
+        // Se existir dados OCR na sessão, garantir que produtos/fornecedor existem na BD
+        $ocrData = session('ocr_purchase_order_data');
+        if ($ocrData && !empty($ocrData['lines'])) {
+            $parsedForCreation = [
+                'supplier' => [
+                    'nome' => $ocrData['supplier']['name'] ?? '',
+                    'nif' => $ocrData['supplier']['nif'] ?? '',
+                ],
+                'lines' => array_map(function ($line) {
+                    return [
+                        'codigo' => $line['productCode'] ?? ($line['ocrRaw']['codigo'] ?? ''),
+                        'descricao' => $line['description'] ?? ($line['ocrRaw']['descricao'] ?? ''),
+                        'quantidade' => $line['quantity'] ?? 1,
+                        'precoUnitario' => $line['unitPrice'] ?? 0,
+                        'unidade' => $line['productUnit'] ?? ($line['ocrRaw']['unidade'] ?? null),
+                        'iva' => $line['taxRate'] ?? ($line['ocrRaw']['iva'] ?? null),
+                    ];
+                }, array_filter($ocrData['lines'], function ($line) {
+                    return ($line['enabled'] ?? true) !== false;
+                })),
+            ];
+            $this->enrichPurchaseOrderDataWithDatabase($parsedForCreation, 'store-resolve', true);
+            session()->forget('ocr_purchase_order_data');
+        }
+
         $validated = $this->validatePurchaseOrderRequest($request);
         $calculated = $this->calculatePurchaseOrderPayload($validated);
         $now = now();
@@ -669,6 +733,7 @@ class PurchaseOrderController extends Controller
             'lines.*.description' => 'sometimes|string|max:500',
             'lines.*.quantity' => 'sometimes|numeric|min:0',
             'lines.*.unitPrice' => 'sometimes|numeric|min:0',
+            'lines.*.enabled' => 'sometimes|boolean',
         ]);
 
         $ocrData = session('ocr_purchase_order_data', []);
@@ -695,11 +760,14 @@ class PurchaseOrderController extends Controller
                     if (isset($editedLine['unitPrice'])) {
                         $ocrData['lines'][$i]['unitPrice'] = (float) $editedLine['unitPrice'];
                     }
+                    if (array_key_exists('enabled', $editedLine)) {
+                        $ocrData['lines'][$i]['enabled'] = (bool) $editedLine['enabled'];
+                    }
                 }
             }
         }
 
-        session()->flash('ocr_purchase_order_data', $ocrData);
+        session()->put('ocr_purchase_order_data', $ocrData);
 
         return response()->json(['success' => true]);
     }
@@ -767,30 +835,27 @@ class PurchaseOrderController extends Controller
                 // Enriquece com dados da base de dados
                 $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($convertedData, $requestId);
 
-                // Verifica se as linhas têm dados válidos (preços > 0 e descrições não vazias).
-                // Se o LLM falhou na extração, tenta o parser regex PHP como fallback.
-                $hasPrices = collect($enrichedData['lines'] ?? [])
-                    ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
-                $hasDescriptions = collect($enrichedData['lines'] ?? [])
-                    ->contains(fn($line) => !empty(trim($line['description'] ?? '')));
-                $hasLines = count($enrichedData['lines'] ?? []) > 0;
+                // ── Always compare LLM output with PHP parser when text is available ──
+                $textForPhpParser = !empty($assembledText) ? $assembledText : $rawText;
+                $llmLineCount = count($enrichedData['lines'] ?? []);
+                $finalData = $enrichedData;
+                $ocrServiceLabel = 'python_microservice';
 
-                $usePhpFallback = ($hasLines && (!$hasPrices || !$hasDescriptions)) && (!empty($rawText) || !empty($assembledText));
-
-                if ($usePhpFallback) {
-                    $reason = !$hasPrices ? 'sem preços' : 'sem descrições';
-                    Log::info("[PO-OCR] LLM não extraiu dados válidos ({$reason}), a tentar parser PHP.", [
-                        'requestId' => $requestId,
-                        'rawTextLen' => strlen($rawText),
-                        'assembledTextLen' => strlen($assembledText),
-                    ]);
-
-                    // Prefer assembled lines text over raw text (it groups OCR
-                    // detections into logical lines, making table parsing possible)
-                    $textForPhpParser = !empty($assembledText) ? $assembledText : $rawText;
+                if (!empty($textForPhpParser)) {
                     $phpParsedData = $this->parsePurchaseOrderDocument($textForPhpParser, $requestId);
+                    $phpEnrichedData = $this->enrichPurchaseOrderDataWithDatabase($phpParsedData, $requestId);
 
-                    // ── DIAGNOSTIC: Log PHP parser output lines ──
+                    $phpLineCount = count($phpEnrichedData['lines'] ?? []);
+                    $phpHasPrices = collect($phpEnrichedData['lines'] ?? [])
+                        ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
+                    $phpHasDescriptions = collect($phpEnrichedData['lines'] ?? [])
+                        ->contains(fn($line) => !empty(trim($line['description'] ?? '')));
+                    $hasPrices = collect($enrichedData['lines'] ?? [])
+                        ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
+                    $hasDescriptions = collect($enrichedData['lines'] ?? [])
+                        ->contains(fn($line) => !empty(trim($line['description'] ?? '')));
+
+                    // Log PHP parser output for comparison
                     Log::info("[PO-OCR] DIAGNOSTIC PHP parser result: supplier=" . json_encode($phpParsedData['supplier'] ?? []));
                     foreach (($phpParsedData['lines'] ?? []) as $i => $line) {
                         Log::info("[PO-OCR] DIAGNOSTIC PHP parsed line[$i]", [
@@ -801,49 +866,52 @@ class PurchaseOrderController extends Controller
                         ]);
                     }
 
-                    $phpEnrichedData = $this->enrichPurchaseOrderDataWithDatabase($phpParsedData, $requestId);
+                    // Compute average prices for comparison
+                    $llmAvgPrice = collect($enrichedData['lines'] ?? [])
+                        ->filter(fn($l) => ($l['unitPrice'] ?? 0) > 0)
+                        ->avg('unitPrice') ?? 0;
+                    $phpAvgPrice = collect($phpEnrichedData['lines'] ?? [])
+                        ->filter(fn($l) => ($l['unitPrice'] ?? 0) > 0)
+                        ->avg('unitPrice') ?? 0;
 
-                    $phpHasPrices = collect($phpEnrichedData['lines'] ?? [])
-                        ->contains(fn($line) => ($line['unitPrice'] ?? 0) > 0);
-                    $phpHasDescriptions = collect($phpEnrichedData['lines'] ?? [])
-                        ->contains(fn($line) => !empty(trim($line['description'] ?? '')));
-                    $phpLineCount = count($phpEnrichedData['lines'] ?? []);
-                    $llmLineCount = count($enrichedData['lines'] ?? []);
+                    $priceDiscrepancy = $llmAvgPrice > 0 ? abs($phpAvgPrice - $llmAvgPrice) / $llmAvgPrice : ($phpAvgPrice > 0 ? 1 : 0);
+                    $phpHasMoreLines = $phpLineCount > $llmLineCount;
+                    $phpHasBetterPrices = ($phpHasPrices && !$hasPrices);
+                    $phpHasBetterDescriptions = ($phpHasDescriptions && !$hasDescriptions);
+                    $priceDiscrepancyLarge = $priceDiscrepancy > 0.5 && $llmLineCount > 0;
 
-                    $phpIsBetter = $phpLineCount > $llmLineCount
-                        || ($phpHasPrices && !$hasPrices)
-                        || ($phpHasDescriptions && !$hasDescriptions);
+                    $usePhp = $phpLineCount > 0 && (
+                        $phpHasMoreLines
+                        || $phpHasBetterPrices
+                        || $phpHasBetterDescriptions
+                        || $priceDiscrepancyLarge
+                    );
 
-                    if ($phpIsBetter && $phpLineCount > 0) {
-                        Log::info('[PO-OCR] Parser PHP produziu melhor resultado, a usar.', [
-                            'requestId' => $requestId,
-                            'phpLines' => $phpLineCount,
-                            'llmLines' => $llmLineCount,
-                        ]);
+                    Log::info('[PO-OCR] LLM vs PHP comparison.', [
+                        'requestId' => $requestId,
+                        'llmLines' => $llmLineCount,
+                        'phpLines' => $phpLineCount,
+                        'llmAvgPrice' => $llmAvgPrice,
+                        'phpAvgPrice' => $phpAvgPrice,
+                        'priceDiscrepancy' => round($priceDiscrepancy * 100, 1) . '%',
+                        'usePhp' => $usePhp,
+                    ]);
 
-                        session()->flash('ocr_purchase_order_data', $phpEnrichedData);
-
-                        return response()->json([
-                            'success' => true,
-                            'requestId' => $requestId,
-                            'rawText' => $rawText,
-                            'parsed' => $phpParsedData,
-                            'enriched' => $phpEnrichedData,
-                            'ocr_service' => 'python_microservice_with_php_fallback',
-                        ]);
+                    if ($usePhp) {
+                        $finalData = $phpEnrichedData;
+                        $ocrServiceLabel = 'python_microservice_with_php_fallback';
                     }
                 }
 
-                // Guarda os dados em sessão para preencher o formulário
-                session()->flash('ocr_purchase_order_data', $enrichedData);
+                session()->put('ocr_purchase_order_data', $finalData);
 
                 return response()->json([
                     'success' => true,
                     'requestId' => $requestId,
                     'rawText' => $rawText,
                     'parsed' => $convertedData,
-                    'enriched' => $enrichedData,
-                    'ocr_service' => 'python_microservice',
+                    'enriched' => $finalData,
+                    'ocr_service' => $ocrServiceLabel,
                 ]);
             } catch (\Exception $e) {
                 // Erro durante o processamento/enriquecimento dos dados —
@@ -888,7 +956,7 @@ class PurchaseOrderController extends Controller
             $parsedData = $this->parsePurchaseOrderDocument($text, $requestId);
             $enrichedData = $this->enrichPurchaseOrderDataWithDatabase($parsedData, $requestId);
 
-            session()->flash('ocr_purchase_order_data', $enrichedData);
+            session()->put('ocr_purchase_order_data', $enrichedData);
 
             return response()->json([
                 'success' => true,
@@ -945,10 +1013,14 @@ class PurchaseOrderController extends Controller
                     'quantidade' => $line['quantity'] ?? 1,
                     'precoUnitario' => $line['unitPrice'] ?? 0,
                     'unidade' => $line['unit'] ?? null,
+                    'iva' => isset($line['taxRate']) ? (float) $line['taxRate'] : null,
                 ];
             }, $lines),
             'documentDate' => $parsed['documentDate'] ?? null,
             'documentNumber' => $parsed['documentNumber'] ?? null,
+            'documentSubtotal' => (string) ($parsed['subtotal'] ?? ''),
+            'documentTotal' => (string) ($parsed['total'] ?? ''),
+            'documentTaxes' => $parsed['taxes'] ?? [],
         ];
     }
 
@@ -962,7 +1034,7 @@ class PurchaseOrderController extends Controller
      * @param  array{nome?:string,nif?:string,email?:string,telefone?:string}  $parsedSupplier
      * @return array{found:bool,model:Supplier}
      */
-    private function findOrCreateSupplierFromOcr(array $parsedSupplier): array
+    private function findOrCreateSupplierFromOcr(array $parsedSupplier, bool $createIfMissing = false): array
     {
         $nome = $this->normalizeText($parsedSupplier['nome'] ?? '');
         $nif = $this->normalizeText($parsedSupplier['nif'] ?? '');
@@ -1000,6 +1072,10 @@ class PurchaseOrderController extends Controller
         }
 
         // 3. Criar fornecedor (se permitido)
+        if (!$createIfMissing) {
+            return ['found' => false, 'model' => null];
+        }
+
         if (!config('purchaseorder.ocr.auto_create_supplier', true)) {
             return ['found' => false, 'model' => null];
         }
@@ -1031,7 +1107,7 @@ class PurchaseOrderController extends Controller
      * @param  array{codigo?:string,descricao?:string,quantidade?:float,precoUnitario?:float,unidade?:string}  $parsedLine
      * @return array{found:bool,model:Product}
      */
-    private function findOrCreateProductFromOcr(array $parsedLine): array
+    private function findOrCreateProductFromOcr(array $parsedLine, bool $createIfMissing = false): array
     {
         $codigo = $this->normalizeText($parsedLine['codigo'] ?? '');
         $descricao = $this->sanitizeDescription($parsedLine['descricao'] ?? '');
@@ -1073,6 +1149,10 @@ class PurchaseOrderController extends Controller
         }
 
         // 3. Criar artigo (se permitido)
+        if (!$createIfMissing) {
+            return ['found' => false, 'model' => null];
+        }
+
         if (!config('purchaseorder.ocr.auto_create_product', true)) {
             return ['found' => false, 'model' => null];
         }
@@ -1085,7 +1165,8 @@ class PurchaseOrderController extends Controller
 
         $family = $this->ensureDefaultFamily();
         $unit = $this->resolveUnitFromOcr($unidadeExtraida);
-        $taxRateCode = $this->resolveTaxRateFromOcr(null);
+        $lineIva = isset($parsedLine['iva']) ? (float) $parsedLine['iva'] : null;
+        $taxRateCode = $this->resolveTaxRateFromOcr($lineIva);
         $newCode = $this->generateProductCode();
 
         $product = Product::create([
@@ -1123,6 +1204,24 @@ class PurchaseOrderController extends Controller
             if ($match) {
                 return (int) $match->taxRateCode;
             }
+
+            // Auto-create the tax rate entry if it doesn't exist yet
+            $roundedCode = (int) round($taxRatePercent);
+            $created = TaxRate::firstOrCreate(
+                ['taxRateCode' => $roundedCode],
+                [
+                    'descriptionTaxRate' => 'IVA ' . $roundedCode . '%',
+                    'taxRate' => $taxRatePercent,
+                    'status' => 1,
+                ]
+            );
+
+            Log::info('[PO-OCR] Taxa de IVA criada automaticamente.', [
+                'taxRateCode' => $created->taxRateCode,
+                'taxRate' => $created->taxRate,
+            ]);
+
+            return (int) $created->taxRateCode;
         }
 
         return (int) config('purchaseorder.ocr.default_tax_rate_code', 1);
@@ -1356,10 +1455,48 @@ class PurchaseOrderController extends Controller
             'linhasEncontradas' => $linhasEncontradas,
         ]);
 
+        // --- Extração de sub-totais e totais do documento ---
+        $documentSubtotal = '0';
+        $documentTotal = '0';
+        $documentTaxes = [];
+
+        foreach ($lines as $line) {
+            $trimmed = trim($line);
+
+            // Subtotal (s/ IVA) — tolera OCR artifacts como "sl" em vez de "subtotal"
+            if (preg_match('/(?:Subtotal|Sub\s*total|sl)\s*(?:\(?s\/?\s*IVA\)?)?\s*:?\s*([\d.,]+)\s*€?/i', $trimmed, $m)) {
+                $documentSubtotal = $m[1];
+            }
+
+            // Total Geral / TOTAL
+            if (preg_match('/(?:TOTAL|Total\s+Geral)\s*:?\s*([\d.,]+)\s*€?/i', $trimmed, $m)) {
+                $documentTotal = $m[1];
+            }
+
+            // Linhas de IVA: "IVA (23%) : 194,84 €"
+            if (preg_match('/(?:IVA|VAT)\s*(?:\(?\s*(\d+)\s*%?\s*\)?)?\s*:?\s*([\d.,]+)\s*€?/i', $trimmed, $m)) {
+                $taxRate = !empty($m[1]) ? (float) $m[1] : 23.0;
+                $documentTaxes[] = [
+                    'rate' => $taxRate,
+                    'amount' => $m[2],
+                ];
+            }
+        }
+
+        Log::info('[PO-OCR] Document totals extracted.', [
+            'requestId' => $requestId,
+            'subtotal' => $documentSubtotal,
+            'total' => $documentTotal,
+            'taxes' => count($documentTaxes),
+        ]);
+
         return [
             'supplier' => $supplier,
             'lines' => $parsedLines,
             'documentDate' => $supplier['dataEncomenda'] ?? null,
+            'documentSubtotal' => $documentSubtotal,
+            'documentTotal' => $documentTotal,
+            'documentTaxes' => $documentTaxes,
         ];
     }
 
@@ -1435,6 +1572,13 @@ class PurchaseOrderController extends Controller
             // Ex: "Parafuso Inox M8x20 10 x 2,50"
             // Remove € de toda a linha ANTES de qualquer parsing (ex: "1,15€" -> "1,15")
             $lineNoEuro = str_replace('€', '', $line);
+
+            // Extrai IVA da linha antes de o remover (ex: "23%", "6%")
+            $trailingIva = null;
+            if (preg_match('/\b(\d{1,2})\s*%\b/u', $lineNoEuro, $ivaMatch)) {
+                $trailingIva = $this->normalizeNumber($ivaMatch[1]);
+            }
+
             $cleanedLine = $lineNoEuro;
             // Limpa artefactos de fim de linha (totais, IVA%) antes de capturar qtd/preço
             $cleanedLine = preg_replace('/\s*\d+\s*%\s*(?:\|\s*\d+(?:[.,]\d+)?)?\s*\)?\s*$/u', '', $cleanedLine);
@@ -1474,9 +1618,20 @@ class PurchaseOrderController extends Controller
                         $priceStr = $trailingNumbers[$tCount - 2];
                     } elseif ($tCount == 3) {
                         // 3 números no final: pode ser [qtd, preco, total] ou [qtd, extra, preco]
-                        $lastNum = $this->normalizeNumber($trailingNumbers[2]);
-                        $secondLastNum = $this->normalizeNumber($trailingNumbers[1]);
-                        if ($secondLastNum > 0 && $lastNum / $secondLastNum > 1.5) {
+                        // ou um total grande onde a qtd foi confundida com total
+                        $num0 = $this->normalizeNumber($trailingNumbers[0]);
+                        $num1 = $this->normalizeNumber($trailingNumbers[1]);
+                        $num2 = $this->normalizeNumber($trailingNumbers[2]);
+                        $secondLastNum = $num1;
+                        $lastNum = $num2;
+
+                        // Sanity check: if the "price" (num1) > "qty" (num0) * 10,
+                        // the numbers are likely misread; try alternative permutation
+                        if ($num1 > $num0 * 10 && $num0 > 0 && $num2 > $num1) {
+                            // [total, qty, price] → use num1 as qty, num2 as price
+                            $qtyStr = $trailingNumbers[1];
+                            $priceStr = $trailingNumbers[2];
+                        } elseif ($secondLastNum > 0 && $lastNum / $secondLastNum > 1.5) {
                             // Relação total/preco > 1.5: [qtd, preco, total]
                             $qtyStr = $trailingNumbers[0];
                             $priceStr = $trailingNumbers[1];
@@ -1496,6 +1651,7 @@ class PurchaseOrderController extends Controller
                         'descricao' => $descricao,
                         'quantidade' => $this->normalizeNumber($qtyStr),
                         'precoUnitario' => $this->normalizeNumber($priceStr),
+                        'iva' => $trailingIva,
                     ];
                     continue;
                 }
@@ -1513,7 +1669,37 @@ class PurchaseOrderController extends Controller
             $desc = $line['descricao'] ?? '';
             // Remove linhas com descrições que são apenas vírgulas, pontos ou artefactos
             $descClean = trim(preg_replace('/[,\s.\[\]|()\-]+/u', '', $desc));
-            return mb_strlen($descClean) >= 3;
+            if (mb_strlen($descClean) < 3) {
+                return false;
+            }
+
+            // Remove linhas cuja descrição contém fragmentos de resumo/total
+            if (preg_match('/\b(?:iva|total|subtotal|sub\s*total|obs(?:erva[çc])?|emiss[ãa]o|documento|nota\s+de\s+encomenda|entrega\s+prevista)\b/i', $desc)) {
+                return false;
+            }
+
+            // Remove linhas cuja descrição contém padrões de morada
+            if (preg_match('/\b(?:Rua|Av\.|Avenida|Travessa|Largo|Pra[çc]a|Estrada|Lote|N[ºo]|NIF)\b/i', $desc)) {
+                $digitsOnly = preg_replace('/[^0-9]/', '', $desc);
+                if (preg_match('/\d{9}/', $digitsOnly) || preg_match('/\d{4}-\d{3}/', $desc)) {
+                    return false;
+                }
+            }
+
+            // Remove linhas cuja descrição é apenas números + caracteres especiais
+            $alphaOnly = preg_replace('/[^A-Za-zÀ-ÿ]/u', '', $desc);
+            if (mb_strlen($alphaOnly) < 4 && preg_match('/\d{3,}/', preg_replace('/[^0-9]/', '', $desc))) {
+                return false;
+            }
+
+            // Sanity check: quantity > 100 AND unitPrice > 100 is likely a total/aggregate line
+            $qty = (float) ($line['quantidade'] ?? 0);
+            $price = (float) ($line['precoUnitario'] ?? 0);
+            if ($qty > 100 && $price > 100) {
+                return false;
+            }
+
+            return true;
         }));
 
         return $results;
@@ -1586,6 +1772,15 @@ class PurchaseOrderController extends Controller
         $numbers = array_map(fn($n) => $this->normalizeNumber($n), $numbersRaw);
         $vatRates = [6.0, 13.0, 23.0];
 
+        // Extrai IVA do token bruto (ex: "6%", "13%" no dataRaw)
+        $iva = null;
+        if (preg_match('/(\d{1,2})\s*%/u', $dataRaw, $ivaMatch)) {
+            $ivaCandidate = (float) $ivaMatch[1];
+            if ($ivaCandidate > 0 && $ivaCandidate <= 100) {
+                $iva = $ivaCandidate;
+            }
+        }
+
         $filtered = [];
         foreach ($numbers as $n) {
             if (in_array($n, $vatRates, true) && count($filtered) >= 1) {
@@ -1612,6 +1807,7 @@ class PurchaseOrderController extends Controller
             'descricao' => $desc,
             'quantidade' => $qty,
             'precoUnitario' => $price,
+            'iva' => $iva,
         ];
     }
 
@@ -1838,6 +2034,16 @@ class PurchaseOrderController extends Controller
             $precoUnitario = 0;
         }
 
+        // Extrai IVA varrendo TODOS os tokens (não usa índice fixo — descrições com
+        // múltiplos tokens deslocam as colunas de dados para além da posição do cabeçalho)
+        $iva = null;
+        foreach ($tokens as $token) {
+            if (preg_match('/^(\d{1,2})\s*%$/', $token, $ivaMatch)) {
+                $iva = (float) $ivaMatch[1];
+                break;
+            }
+        }
+
         // Deteção de unidade
         $unidade = null;
         $unitKeywords = ['KG', 'CX', 'UN', 'G', 'L', 'ML', 'LT', 'M', 'PCT', 'SAC', 'MOLHO', 'EMB', 'PAR'];
@@ -1866,6 +2072,7 @@ class PurchaseOrderController extends Controller
             'quantidade' => $quantidade,
             'precoUnitario' => $precoUnitario,
             'unidade' => $unidade,
+            'iva' => $iva,
         ];
     }
 
@@ -1879,14 +2086,23 @@ class PurchaseOrderController extends Controller
             return true;
         }
 
-        // Exclude by keyword patterns
+        // Exclude by keyword patterns — includes garbled OCR fragments (sl, ções, etc.)
         if ((bool) preg_match(
-            '/(?:total|iva|subtotal|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.|'
+            '/(?:total|iva|subtotal|sub\s*total|eur|nif|contribuinte|data|página|page|observaç|condiç|obs\.|'
             . 'nota\s+de\s+encomenda|entrega\s+prevista|documento\s+n[ºo]|'
-            . 'data\s+emiss[ãa]o|c[óo]digo\s+artigo|descri[çc][ãa]o|fornecedor)/i',
+            . 'data\s+emiss[ãa]o|c[óo]digo\s+artigo|descri[çc][ãa]o|fornecedor|'
+            . 'cliente|\\bNIF\\b|\\bsl\\b|\\bobs\\b|\\bções\\b|\\bs\/\\s*IVA\\b)/i',
             $line
         )) {
             return true;
+        }
+
+        // Exclude lines with embedded NIF (9 consecutive digits) and address context
+        $digitsOnly = preg_replace('/[^0-9]/', '', $line);
+        if (strlen($digitsOnly) >= 9 && preg_match('/\d{9}/', $digitsOnly)) {
+            if (preg_match('/\b(?:nif|contribuinte|Rua|Av\.|Avenida|cliente|morada)\b/i', $line)) {
+                return true;
+            }
         }
 
         // Exclude URL / file path patterns
@@ -1926,11 +2142,16 @@ class PurchaseOrderController extends Controller
             return true;
         }
 
+        // Exclude lines starting with a large number (>100) followed by fiscal/header terms
+        if (preg_match('/^\s*(\d{3,}(?:[.,]\d+)?)\s*[€]?\s*(?:IVA|Total|Subtotal|$|\|)/i', $line)) {
+            return true;
+        }
+
         // Exclude lines with code patterns that match known header/address words
         if (preg_match('/^(?:NOTA|DATA|ENTREGA|PREVISTA|DOCUMENTO|EMISS[ÃA]O|'
             . 'C[ÓO]DIGO|DESCRI[ÇC][ÃA]O|QTD|TOTAL|FORNECEDOR|NIF|TEL|TELEFONE|'
             . 'CONTRIBUINTE|RUA|AV\.|AVENIDA|P[ÁA]GINA|OBS|IVA|EUR|ARTIGO|'
-            . 'DESIGNA[ÇC][ÃA]O|UNIDADE|MEDIDA|REFER[ÊE]NCIA)\b$/i', $line)) {
+            . 'CLIENTE|DESIGNA[ÇC][ÃA]O|UNIDADE|MEDIDA|REFER[ÊE]NCIA)\b$/i', $line)) {
             return true;
         }
 
@@ -1943,10 +2164,10 @@ class PurchaseOrderController extends Controller
      * Para cada artigo, tenta resolver o produto existente ou cria um novo.
      * O mesmo para o fornecedor.
      */
-    private function enrichPurchaseOrderDataWithDatabase(array $parsedData, ?string $requestId = null): array
+    private function enrichPurchaseOrderDataWithDatabase(array $parsedData, ?string $requestId = null, bool $createIfMissing = false): array
     {
         // --- Fornecedor ---
-        $supplierResult = $this->findOrCreateSupplierFromOcr($parsedData['supplier'] ?? []);
+        $supplierResult = $this->findOrCreateSupplierFromOcr($parsedData['supplier'] ?? [], $createIfMissing);
         $supplierModel = $supplierResult['model'] ?? null;
 
         $enrichedSupplier = [
@@ -1958,9 +2179,10 @@ class PurchaseOrderController extends Controller
 
         // --- Linhas ---
         $enrichedLines = [];
+        $enabledLineSubtotals = 0;
 
         foreach (($parsedData['lines'] ?? []) as $i => $line) {
-            $productResult = $this->findOrCreateProductFromOcr($line);
+            $productResult = $this->findOrCreateProductFromOcr($line, $createIfMissing);
             $productModel = $productResult['model'] ?? null;
 
             $productCode = $productModel ? (string) $productModel->code : ($line['codigo'] ?? '');
@@ -2002,32 +2224,175 @@ class PurchaseOrderController extends Controller
                 continue;
             }
 
-            $taxRateCode = $productModel ? (int) $productModel->taxRateCode : $this->resolveTaxRateFromOcr(null);
+            $quantity = $this->normalizeNumber($line['quantidade'] ?? 1);
+            $unitPrice = $this->normalizeNumber($line['precoUnitario'] ?? 0);
+
+            // ── Semantic validation: skip lines that look like non-products (only during preview) ──
+            if (!$createIfMissing && $this->isDescriptionLikelyNonProduct($description, $productCode)) {
+                Log::info('[PO-OCR] Skipping line with non-product description.', [
+                    'description' => $description,
+                    'code' => $productCode,
+                ]);
+                continue;
+            }
+
+            $lineIva = isset($line['iva']) ? (float) $line['iva'] : null;
+            $taxRateCode = $productModel ? (int) $productModel->taxRateCode : $this->resolveTaxRateFromOcr($lineIva);
             $taxRatePercent = (float) TaxRate::where('taxRateCode', $taxRateCode)->value('taxRate') ?? 0;
+
+            $productFamily = $productModel ? $productModel->family : ($createIfMissing ? $this->ensureDefaultFamily() : config('purchaseorder.ocr.default_family', 'GERAL'));
+            $productUnit = $productModel ? $productModel->unit : ($createIfMissing ? $this->resolveUnitFromOcr($line['unidade'] ?? '') : config('purchaseorder.ocr.default_unit', 'UN'));
 
             $enrichedLines[] = [
                 'productCode' => $productCode,
                 'description' => $description,
-                'productFamily' => $productModel ? $productModel->family : $this->ensureDefaultFamily(),
-                'productUnit' => $productModel ? $productModel->unit : $this->resolveUnitFromOcr($line['unidade'] ?? ''),
+                'productFamily' => $productFamily,
+                'productUnit' => $productUnit,
                 'taxRateCode' => $taxRateCode,
                 'taxRate' => $taxRatePercent,
-                'quantity' => $this->normalizeNumber($line['quantidade'] ?? 1),
-                'unitPrice' => $this->normalizeNumber($line['precoUnitario'] ?? 0),
+                'quantity' => $quantity,
+                'unitPrice' => $unitPrice,
                 'found' => $productResult['found'] ?? false,
+                'enabled' => true,
+                'ocrRaw' => [
+                    'codigo' => $line['codigo'] ?? '',
+                    'descricao' => $rawOcrDesc,
+                    'quantidade' => $line['quantidade'] ?? null,
+                    'precoUnitario' => $line['precoUnitario'] ?? null,
+                    'unidade' => $line['unidade'] ?? null,
+                    'iva' => $line['iva'] ?? null,
+                ],
             ];
+
+            $enabledLineSubtotals += $quantity * $unitPrice;
         }
+
+        // ── Subtotal cross-validation ──
+        $validation = $this->buildSubtotalValidation($parsedData, $enrichedLines, $enabledLineSubtotals);
 
         Log::info('[PO-OCR] Dados enriquecidos com BD.', [
             'requestId' => $requestId,
             'supplier' => $enrichedSupplier,
             'linesCount' => count($enrichedLines),
+            'validation' => $validation,
         ]);
 
         return [
             'supplier' => $enrichedSupplier,
             'lines' => $enrichedLines,
+            'validation' => $validation,
+            'documentDate' => $parsedData['documentDate'] ?? null,
+            'documentNumber' => $parsedData['documentNumber'] ?? null,
         ];
+    }
+
+    /**
+     * Verifica se uma descrição de linha extraída parece ser algo que NÃO é um produto
+     * (morada, NIF, total, IVA, observações, etc.).
+     */
+    private function isDescriptionLikelyNonProduct(string $description, string $productCode): bool
+    {
+        $desc = mb_strtolower($description, 'UTF-8');
+
+        // Address patterns
+        if (preg_match('/\b(?:rua|av\.|avenida|travessa|largo|pra[çc]a|estrada|lote|andar|n[ºo])\b/i', $desc)) {
+            $stripped = preg_replace('/[^a-z0-9]/', '', $desc);
+            if (preg_match('/\d{9}/', $stripped) || preg_match('/\d{4}-\d{3}/', $desc)) {
+                return true;
+            }
+        }
+
+        // NIF: 9 consecutive digits. Skip if line has meaningfully more text.
+        $digitsOnly = preg_replace('/[^0-9]/', '', $desc);
+        if (preg_match('/\d{9}/', $digitsOnly) && mb_strlen(preg_replace('/[^a-z]/', '', $desc)) < 8) {
+            return true;
+        }
+
+        // Fiscal/administrative terms
+        if (preg_match('/\b(?:IVA|VAT|total(?:\s+geral)?|subtotal|emiss[ãa]o|documento|nota\s+de\s+encomenda|entrega\s+prevista)\b/i', $desc)) {
+            return true;
+        }
+
+        // Phone numbers (9+ digits with spaces)
+        if (preg_match('/\d[\d\s]{8,}/', $desc) && preg_match_all('/\d/', $desc) >= 9 && mb_strlen($desc) < 40) {
+            return true;
+        }
+
+        // NIF label pattern (e.g., "NIF: 502345671")
+        if (preg_match('/\bNIF\b/i', $desc) && preg_match('/\d{9}/', $digitsOnly)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Calcula a validação cruzada de sub-totais: compara o subtotal extraído do
+     * documento com o subtotal calculado a partir das linhas.
+     */
+    private function buildSubtotalValidation(array $parsedData, array $enrichedLines, float $calculatedSubtotal): array
+    {
+        $extractedSubtotal = $this->normalizeNumber($parsedData['documentSubtotal'] ?? '0');
+        $extractedTotal = $this->normalizeNumber($parsedData['documentTotal'] ?? '0');
+        $extractedTaxes = $parsedData['documentTaxes'] ?? [];
+
+        $validation = [];
+
+        if ($extractedSubtotal > 0 && $calculatedSubtotal > 0) {
+            $disc = abs($calculatedSubtotal - $extractedSubtotal);
+            $discPct = $extractedSubtotal > 0 ? ($disc / $extractedSubtotal) * 100 : 0;
+
+            if ($discPct < 2) {
+                $status = 'ok';
+            } elseif ($discPct < 10) {
+                $status = 'warning';
+            } else {
+                $status = 'error';
+            }
+
+            $validation['subtotal'] = [
+                'extracted' => round($extractedSubtotal, 2),
+                'calculated' => round($calculatedSubtotal, 2),
+                'discrepancy' => round($disc, 2),
+                'discrepancyPercent' => round($discPct, 2),
+                'status' => $status,
+            ];
+        }
+
+        // Calculated total = subtotal + sum of tax amounts extracted
+        if ($extractedTotal > 0 && $calculatedSubtotal > 0) {
+            $totalTaxes = 0;
+            foreach ($extractedTaxes as $tax) {
+                $totalTaxes += $this->normalizeNumber($tax['amount'] ?? '0');
+            }
+            $calculatedTotal = $calculatedSubtotal + $totalTaxes;
+
+            $disc = abs($calculatedTotal - $extractedTotal);
+            $discPct = $extractedTotal > 0 ? ($disc / $extractedTotal) * 100 : 0;
+
+            if ($discPct < 2) {
+                $status = 'ok';
+            } elseif ($discPct < 10) {
+                $status = 'warning';
+            } else {
+                $status = 'error';
+            }
+
+            $validation['total'] = [
+                'extracted' => round($extractedTotal, 2),
+                'calculated' => round($calculatedTotal, 2),
+                'discrepancy' => round($disc, 2),
+                'discrepancyPercent' => round($discPct, 2),
+                'status' => $status,
+            ];
+        }
+
+        // Include extracted taxes for frontend display
+        if (!empty($extractedTaxes)) {
+            $validation['taxes'] = $extractedTaxes;
+        }
+
+        return $validation;
     }
 
     // ========================================================================
