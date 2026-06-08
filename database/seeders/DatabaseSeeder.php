@@ -17,6 +17,7 @@ class DatabaseSeeder extends Seeder
     {
         $this->call([
             TaxRateSeeder::class,
+            SupermarketDataSeeder::class,
         ]);
 
         User::factory()->create([
