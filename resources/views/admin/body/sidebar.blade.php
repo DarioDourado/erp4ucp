@@ -94,6 +94,7 @@
                     </a>
                     <ul class="sub-menu" aria-expanded="false">
                         <li><a href="{{ route('purchaseOrder.analytics') }}">Encomendas de Fornecedores</a></li>
+                        <li><a href="{{ route('reports.pendingReceipts') }}">Receção Pendente</a></li>
                         <li><a href="charts-apex.html">Apex Charts</a></li>
                         <li><a href="charts-chartjs.html">Chartjs Charts</a></li>
                         <li><a href="charts-flot.html">Flot Charts</a></li>
