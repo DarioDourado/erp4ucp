@@ -13,6 +13,9 @@ class ReportController extends Controller
     {
         $orders = Cache::remember('pending_receipts_analytics', 300, function () {
             return PurchaseOrderC::with(['supplierLink', 'detailLines'])
+                ->whereHas('detailLines', function ($q) {
+                    $q->whereRaw('COALESCE(deliveryQuantity, 0) < quantity');
+                })
                 ->orderBy('pODate', 'DESC')
                 ->orderBy('pONumber', 'DESC')
                 ->get()
