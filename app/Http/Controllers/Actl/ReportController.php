@@ -4,19 +4,20 @@ namespace App\Http\Controllers\Actl;
 
 use App\Http\Controllers\Controller;
 use App\Models\PurchaseOrderC;
+use Illuminate\Support\Facades\Cache;
 
 class ReportController extends Controller
 {
 
     public function PendingReceiptsAll()
     {
-        $orders = PurchaseOrderC::with(['supplierLink', 'detailLines'])
-            ->orderBy('pODate', 'DESC')
-            ->orderBy('pONumber', 'DESC')
-            ->get()
-            ->map(fn ($order) => $this->decorateOrderTotals($order))
-            ->filter(fn ($order) => $order->pendingValue > 0)
-            ->values();
+        $orders = Cache::remember('pending_receipts_analytics', 300, function () {
+            return PurchaseOrderC::with(['supplierLink', 'detailLines'])
+                ->orderBy('pODate', 'DESC')
+                ->orderBy('pONumber', 'DESC')
+                ->get()
+                ->map(fn ($order) => $this->decorateOrderTotals($order));
+        })->filter(fn ($order) => $order->pendingValue > 0)->values();
 
         $kpis = [
             'totalOrders'    => $orders->count(),

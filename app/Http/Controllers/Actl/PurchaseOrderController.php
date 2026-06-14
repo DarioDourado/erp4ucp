@@ -17,6 +17,7 @@ use App\Models\StockMovement;
 use App\Services\OcrService;
 use Auth;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
@@ -40,11 +41,13 @@ class PurchaseOrderController extends Controller
     {
         $statusFilter = $request->query('status', 'all');
 
-        $allPurchaseOrders = PurchaseOrderC::with(['supplierLink', 'detailLines'])
-            ->orderBy('pODate', 'DESC')
-            ->orderBy('pONumber', 'DESC')
-            ->get()
-            ->map(fn ($purchaseOrder) => $this->decoratePurchaseOrderSummary($purchaseOrder));
+        $allPurchaseOrders = Cache::remember('purchase_orders_analytics', 300, function () {
+            return PurchaseOrderC::with(['supplierLink', 'detailLines'])
+                ->orderBy('pODate', 'DESC')
+                ->orderBy('pONumber', 'DESC')
+                ->get()
+                ->map(fn ($purchaseOrder) => $this->decoratePurchaseOrderSummary($purchaseOrder));
+        });
 
         $filteredPurchaseOrders = $this->filterPurchaseOrdersBySatisfaction($allPurchaseOrders, $statusFilter)->values();
         $analyticsData = $this->buildPurchaseOrderAnalyticsData($allPurchaseOrders, $filteredPurchaseOrders);
@@ -182,6 +185,9 @@ class PurchaseOrderController extends Controller
             PurchaseOrderD::insert($calculated['detailRows']);
         });
 
+        Cache::forget('purchase_orders_analytics');
+        Cache::forget('pending_receipts_analytics');
+
         return redirect()->route('purchaseOrder.all')->with([
             'message' => 'Encomenda a fornecedor criada com sucesso.',
             'alert-type' => 'success',
@@ -248,6 +254,9 @@ class PurchaseOrderController extends Controller
             PurchaseOrderD::insert($calculated['detailRows']);
         });
 
+        Cache::forget('purchase_orders_analytics');
+        Cache::forget('pending_receipts_analytics');
+
         return redirect()->route('purchaseOrder.all')->with([
             'message' => 'Encomenda a fornecedor atualizada com sucesso.',
             'alert-type' => 'success',
@@ -262,6 +271,9 @@ class PurchaseOrderController extends Controller
             PurchaseOrderD::where('pONumber', $purchaseOrder->pONumber)->delete();
             $purchaseOrder->delete();
         });
+
+        Cache::forget('purchase_orders_analytics');
+        Cache::forget('pending_receipts_analytics');
 
         return redirect()->route('purchaseOrder.all')->with([
             'message' => 'Encomenda a fornecedor eliminada com sucesso.',
