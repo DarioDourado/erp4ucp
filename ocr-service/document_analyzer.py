@@ -16,12 +16,16 @@ import os
 import requests
 from dataclasses import dataclass, field, asdict
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://127.0.0.1:8080/v1")
 DEFAULT_MODEL = os.environ.get("LLM_MODEL", "qwen2.5-7b-instruct-q4_k_m")
 LLM_MAX_CONTEXT = int(os.environ.get("LLM_MAX_CONTEXT", "4096"))
+ENABLE_FALLBACK = os.environ.get("ENABLE_FALLBACK", "true").lower() in ("true", "1", "yes")
 
 SYSTEM_PROMPT = """You are a specialized AI for extracting structured data from Portuguese purchase order (encomenda a fornecedor) OCR text.
 
@@ -234,6 +238,12 @@ OCR Text:
                 or llm_prices == 0
             )
             if llm_failed:
+                if not ENABLE_FALLBACK:
+                    logger.warning(
+                        f"LLM result appears incomplete, returning as-is "
+                        f"(fallback disabled, LLM: {llm_lines} lines / {llm_prices} prices)"
+                    )
+                    return doc
                 logger.warning(
                     f"LLM result appears incomplete, preferring fallback "
                     f"(LLM: {llm_lines} lines / {llm_prices} prices, "
@@ -244,13 +254,19 @@ OCR Text:
 
     except requests.exceptions.ConnectionError:
         logger.error(f"Cannot connect to LLM at {llm_url}")
+        if not ENABLE_FALLBACK:
+            raise
         logger.info("LLM not available, falling back to regex-based parsing")
         return _fallback_parse(ocr_text)
     except requests.exceptions.Timeout:
         logger.error("LLM request timed out")
+        if not ENABLE_FALLBACK:
+            raise
         return _fallback_parse(ocr_text)
     except Exception as e:
         logger.error(f"LLM analysis failed: {e}")
+        if not ENABLE_FALLBACK:
+            raise
         return _fallback_parse(ocr_text)
 
 

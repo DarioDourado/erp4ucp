@@ -38,9 +38,9 @@ Os dados extraídos são apresentados ao utilizador para revisão e edição, co
 
 - Captura por câmara (dispositivos móveis) ou upload de ficheiro (PNG, JPG, PDF até 10 MB)
 - Pipeline dual de OCR (Python EasyOCR + fallback Tesseract PHP)
-- Compreensão semântica via LLM local (Qwen2.5 7B)
+- Compreensão semântica via LLM local (Qwen2.5 7B via llama-cpp; configurável via .env)
 - Resolução automática de fornecedores e produtos (fuzzy matching + auto-criação)
-- Validação de subtotais (comparação documento vs. soma das linhas)
+- Validação cruzada de totais (comparação documento vs. soma das linhas)
 - Interface de revisão/edição interativa
 - Pré-preenchimento do formulário de criação de encomenda
 
@@ -103,7 +103,7 @@ Os dados extraídos são apresentados ao utilizador para revisão e edição, co
 ┌─────────────────────────────────────────────────────────────────┐
 │              SERVIDOR LLM (llama-cpp, 127.0.0.1:8080)           │
 │                                                                  │
-│  Modelo: Qwen2.5 7B Instruct (GGUF, Q4 quantizado)              │
+│  Modelo: LLM local via llama-cpp (GGUF, configurável)             │
 │  Contexto: 4096 tokens                                           │
 │  Temperatura: 0.1                                                │
 └─────────────────────────────────────────────────────────────────┘
@@ -118,7 +118,7 @@ Os dados extraídos são apresentados ao utilizador para revisão e edição, co
 | **Base de Dados** | SQLite (configurável) | Persistência de encomendas, fornecedores, produtos |
 | **OCR Primário** | EasyOCR (PyTorch, Python) | Extração de texto com IA (português + inglês) |
 | **OCR Fallback** | Tesseract 5 (PHP) | Extração de texto tradicional |
-| **LLM** | llama-cpp + Qwen2.5 7B | Compreensão semântica do documento |
+| **LLM** | llama-cpp + Qwen2.5 7B (GGUF, configurável) | Compreensão semântica do documento |
 | **Pré-processamento** | OpenCV, PyMuPDF | Correção de imagem, renderização de PDF |
 | **Comunicação** | HTTP REST (Laravel HTTP Client ↔ FastAPI) | Integração entre serviços |
 
@@ -207,10 +207,11 @@ O `OcrService` envia o ficheiro via HTTP POST para `http://127.0.0.1:5050/analyz
 
 Se o serviço Python estiver offline (connection refused) ou retornar erro:
 
-1. Guarda o ficheiro em `storage/ocr-temp/`.
+1. Guarda o ficheiro em `storage/app/public/ocr-temp/`.
 2. **Para PDFs:** Converte cada página para PNG com `pdftoppm -png -r 300` (Poppler).
 3. **Para imagens:** Executa Tesseract com `-l por` (português).
 4. Passa o texto bruto para `parsePurchaseOrderDocument()` (parser PHP baseado em regex).
+5. Enriquece os dados extraídos com `enrichPurchaseOrderDataWithDatabase()` (resolução de fornecedores e produtos na base de dados).
 
 **2.3 — Normalização de formato:**
 
@@ -248,7 +249,13 @@ O método `enrichPurchaseOrderDataWithDatabase()` enriquece os dados extraídos 
 
 **3.2 — Resolução de Produtos (`findOrCreateProductFromOcr()`):**
 
-Para cada linha extraída:
+Antes da resolução, o sistema filtra automaticamente linhas de baixa qualidade:
+- Linhas sem código E sem descrição (ignoradas).
+- Descrições com menos de 3 caracteres alfabéticos (ignoradas).
+- Padrões como caminhos de ficheiro, URLs ou texto apenas numérico (ignorados).
+- Descrições que contêm moradas, NIFs, totais de IVA ou termos fiscais — detetadas por `isDescriptionLikelyNonProduct()` (ignoradas).
+
+Para cada linha que passa a filtragem:
 
 1. Procura correspondência exata por código na tabela `Product`.
 2. Procura correspondência exata por descrição.
@@ -256,14 +263,14 @@ Para cada linha extraída:
 4. Se não encontrado **E** `auto_create_product = true` **E** descrição tem ≥ 2 caracteres:
    - Garante família padrão (`ensureDefaultFamily()` → cria "GERAL" se necessário).
    - Resolve unidade do OCR (`resolveUnitFromOcr()` → mapeia KG, CX, UN, L, M, etc.; fallback "UN").
-   - Resolve taxa de IVA (`resolveTaxRateFromOcr()` → procura percentagem na tabela `TaxRate`; fallback para config default, tipicamente 23%).
+    - Resolve taxa de IVA (`resolveTaxRateFromOcr()` → procura percentagem na tabela `TaxRate`; se não encontrada, cria automaticamente via `firstOrCreate()`; fallback para config default, tipicamente 23%).
    - Gera código de produto (`generateProductCode()` → `ART-{next_id}`).
    - Cria registo em `Product`.
    - Regista a criação em log.
 
-**3.3 — Validação de Subtotais (`buildSubtotalValidation()`):**
+**3.3 — Validação de Totais (`buildSubtotalValidation()`):**
 
-Compara o subtotal/total extraído do documento com a soma calculada das linhas (quantidade × preço unitário). Reporta discrepâncias com estado: **OK** / **Aviso** / **Erro**.
+Compara o subtotal e total extraídos do documento com os valores calculados (soma das linhas: quantidade × preço unitário). Reporta discrepâncias com estado: **OK** (< 2%), **Aviso** (2–10%) ou **Erro** (> 10%). Também passa os dados de impostos extraídos para o frontend.
 
 ### Fase 4 — Revisão e Edição (Frontend)
 
@@ -316,10 +323,10 @@ Compara o subtotal/total extraído do documento com a soma calculada das linhas 
 |-----------------|-----------|-------------------|----------------|
 | `PurchaseOrderC` | `PurchaseOrderC` | `id`, `pONumber`, `supplierCode`, `pODate`, `pOObservation`, `financialDiscount`, `totalNet`, `totalTax`, `totalGross`, `status`, `created_by`, `updated_by` | Cabeçalho criado após revisão OCR |
 | `PurchaseOrderD` | `PurchaseOrderD` | `id`, `pONumber`, `productCode`, `productFamily`, `productUnit`, `taxRateCode`, `quantity`, `deliveryQuantity`, `unitPrice`, `sellingPrice`, `status` | Linhas criadas a partir do OCR |
-| `Supplier` | `Supplier` | `code` (PK, int), `name`, `nif`, `address1`, `address2`, `town`, `postalCode`, `status` | Auto-criado ou correspondido do OCR |
-| `Product` | `Product` | `code` (PK, string), `description`, `family`, `unit`, `taxRateCode`, `image`, `status` | Auto-criado ou correspondido do OCR |
-| `Family` | `Family` | `family` (PK, string) | "GERAL" auto-criada se em falta |
-| `UnitMeasure` | `UnitMeasure` | `unit` (PK, string) | "UN" auto-criada se em falta; deteção de unidade do OCR |
+| `Supplier` | `Supplier` | `code` (chave de negócio, int), `name`, `nif`, `address1`, `address2`, `town`, `postalCode`, `status` | Auto-criado ou correspondido do OCR |
+| `Product` | `Product` | `code` (chave de negócio, string), `description`, `family`, `unit`, `taxRateCode`, `image`, `status` | Auto-criado ou correspondido do OCR |
+| `Family` | `Family` | `family` (chave de negócio, string) | "GERAL" auto-criada se em falta |
+| `UnitMeasure` | `UnitMeasure` | `unit` (chave de negócio, string) | "UN" auto-criada se em falta; deteção de unidade do OCR |
 | `TaxRate` | `TaxRate` | `taxRateCode` (PK, int), `descriptionTaxRate`, `taxRate` (float %), `status` | Taxa de IVA correspondida por percentagem |
 
 ---
@@ -332,9 +339,9 @@ Compara o subtotal/total extraído do documento com a soma calculada das linhas 
 OCR_SERVICE_URL=http://127.0.0.1:5050
 OCR_LLM_MODEL=qwen2.5-7b-instruct-q4_k_m
 OCR_SERVICE_TIMEOUT=120
-LLM_BASE_URL=http://127.0.0.1:8080/v1
-LLM_MODEL=qwen2.5-7b-instruct-q4_k_m
 ```
+
+> **Nota:** O modelo LLM é configurável via `OCR_LLM_MODEL`. Qualquer modelo GGUF compatível com llama-cpp pode ser usado.
 
 ### `config/services.php` — secção `ocr`
 
@@ -409,7 +416,7 @@ O sistema utiliza uma arquitetura de duas camadas com fallback automático.
 | Característica | Detalhe |
 |----------------|---------|
 | **Motor** | llama-cpp (servidor local com API compatível com OpenAI) |
-| **Modelo** | Qwen2.5 7B Instruct (GGUF, quantização Q4_K_M) |
+| **Modelo** | Qwen2.5 7B Instruct (GGUF, Q4_K_M) — configurável via `OCR_LLM_MODEL` |
 | **Contexto máximo** | 4096 tokens |
 | **Temperatura** | 0.1 (determinístico) |
 | **Prompting** | Few-shot com 3 exemplos detalhados em português, instruções explícitas de output JSON |
@@ -466,7 +473,7 @@ Código extraído do OCR
 │                                                            │
 │    ┌─ Garante família "GERAL"                              │
 │    ├─ Resolve unidade (KG, CX, UN, L, M, etc.)            │
-│    ├─ Resolve taxa de IVA (% → TaxRate)                    │
+│    ├─ Resolve taxa de IVA (% → TaxRate, auto-cria se necessário) │
 │    ├─ Gera código "ART-{next_id}"                          │
 │    └─ Cria Product                                         │
 └─ NÃO
@@ -503,7 +510,7 @@ Documento (PDF/Imagem)
 │             productDescription,      │
 │             quantity, unitPrice,     │
 │             unit, taxRate }],        │
-│   totalNet, totalGross               │
+│   subtotal, total, taxes             │
 │ }                                    │
 └─────────────────────────────────────┘
         │ convertLLMFormatToInternal()
@@ -511,12 +518,15 @@ Documento (PDF/Imagem)
 ┌─────────────────────────────────────┐
 │ JSON Interno PHP                     │
 │ {                                    │
-│   supplier: { nome, nif, morada },   │
+│   supplier: { nome, nif, morada,     │
+│               email, telefone },     │
 │   lines: [{ codigo, descricao,       │
 │             quantidade,              │
 │             precoUnitario,           │
 │             unidade, iva }],         │
-│   documentDate, documentNumber       │
+│   documentDate, documentNumber,      │
+│   documentSubtotal, documentTotal,   │
+│   documentTaxes                      │
 │ }                                    │
 └─────────────────────────────────────┘
         │ enrichPurchaseOrderDataWithDatabase()
@@ -532,9 +542,14 @@ Documento (PDF/Imagem)
 │             taxRate, quantity,       │
 │             unitPrice, found,        │
 │             enabled, ocrRaw }],      │
-│   validation: { subtotal: {          │
-│     extracted, calculated,           │
-│     discrepancy, status } }          │
+│   validation: {                      │
+│     subtotal: { extracted,           │
+│       calculated, discrepancy,       │
+│       status },                      │
+│     total: { extracted,              │
+│       calculated, discrepancy,       │
+│       status },                      │
+│     taxes: [...] }                   │
 │ }                                    │
 └─────────────────────────────────────┘
         │ Revisão do utilizador + sessão
@@ -581,6 +596,13 @@ O fluxo de dados OCR atravessa várias páginas via sessão Laravel:
 - `POST /purchaseOrder` → Lê sessão, cria encomenda, limpa sessão.
 
 Isto permite que o utilizador navegue entre a página OCR e o formulário de encomenda sem perder os dados extraídos.
+
+### Campos Editáveis via AJAX
+
+O endpoint `updatePurchaseOrderOCRData` permite editar os seguintes campos, persistindo as alterações na sessão:
+
+- **Fornecedor:** `name` e `nif`
+- **Cada linha:** `productCode`, `description`, `quantity`, `unitPrice`, `enabled` (seleção/deseleção)
 
 ---
 
@@ -663,7 +685,7 @@ requests
 
 ### Modelo LLM
 
-- **Ficheiro:** `qwen2.5-7b-instruct-q4_k_m.gguf`
+- **Ficheiro:** ficheiro GGUF do modelo configurado em `OCR_LLM_MODEL` (ex: `qwen2.5-7b-instruct-q4_k_m.gguf`, ~4.7 GB)
 - **Tamanho:** ~4.7 GB (quantizado Q4)
 - **RAM recomendada:** 8+ GB
 
@@ -680,7 +702,7 @@ python app.py
 start_service.bat
 
 # Servidor LLM (llama-cpp)
-llama-server.exe -m qwen2.5-7b-instruct-q4_k_m.gguf --port 8080
+llama-server.exe -m <modelo>.gguf --port 8080
 ```
 
 ---
