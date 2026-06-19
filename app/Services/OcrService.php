@@ -48,6 +48,7 @@ class OcrService
     public function analyzeDocument(UploadedFile $file, bool $useLlm = true): array
     {
         $startTime = microtime(true);
+        set_time_limit(max(300, $this->timeout + 60));
 
         try {
             $response = Http::timeout($this->timeout)
@@ -165,6 +166,7 @@ class OcrService
      */
     public function extractTextOnly(UploadedFile $file): array
     {
+        set_time_limit(120);
         try {
             $response = Http::timeout(60)
                 ->attach(
