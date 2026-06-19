@@ -111,10 +111,16 @@ class PurchaseOrderController extends Controller
                     return ($line['enabled'] ?? true) !== false;
                 })
                 ->map(function ($line) {
+                    $unitPriceWithIva = (float) ($line['unitPrice'] ?? 0);
+                    $taxRate = (float) ($line['taxRate'] ?? 0);
+                    $unitPrice = $taxRate > 0
+                        ? $unitPriceWithIva / (1 + $taxRate / 100)
+                        : $unitPriceWithIva;
+
                     return [
                         'productCode' => (string) ($line['productCode'] ?? ''),
                         'quantity' => (float) ($line['quantity'] ?? 1),
-                        'unitPrice' => (float) ($line['unitPrice'] ?? 0),
+                        'unitPrice' => $unitPrice,
                     ];
                 })
                 ->values();
