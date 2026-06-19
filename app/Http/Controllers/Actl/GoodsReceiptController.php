@@ -13,6 +13,7 @@ use App\Models\Supplier;
 use App\Models\TaxRate;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
@@ -89,6 +90,9 @@ class GoodsReceiptController extends Controller
 
             $this->applyPurchaseOrderDeliveredQuantities($prepared['detailRows'], true);
         });
+
+        Cache::forget('purchase_orders_analytics');
+        Cache::forget('pending_receipts_analytics');
 
         return redirect()->route('goodsReceipt.all')->with([
             'message' => 'Entrada de mercadoria criada com sucesso.',
@@ -185,6 +189,9 @@ class GoodsReceiptController extends Controller
             $this->applyPurchaseOrderDeliveredQuantities($prepared['detailRows'], true);
         });
 
+        Cache::forget('purchase_orders_analytics');
+        Cache::forget('pending_receipts_analytics');
+
         return redirect()->route('goodsReceipt.all')->with([
             'message' => 'Entrada de mercadoria atualizada com sucesso.',
             'alert-type' => 'success',
@@ -247,6 +254,9 @@ class GoodsReceiptController extends Controller
                 'updated_at' => now(),
             ]);
         });
+
+        Cache::forget('purchase_orders_analytics');
+        Cache::forget('pending_receipts_analytics');
 
         return redirect()->route('goodsReceipt.all')->with([
             'message' => 'Entrada de mercadoria anulada com sucesso.',

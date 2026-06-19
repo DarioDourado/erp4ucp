@@ -12,6 +12,7 @@ use App\Http\Controllers\Actl\TaxRateController;
 use App\Http\Controllers\Actl\ProductController;
 use App\Http\Controllers\Actl\PurchaseOrderController;
 use App\Http\Controllers\Actl\GoodsReceiptController;
+use App\Http\Controllers\Actl\ReportController;
 
 Route::get('/', function () {
     return redirect()->route('login');
@@ -117,6 +118,12 @@ Route::middleware(['auth'])->group(function () {
         Route::post('/purchaseOrder/upload-document', 'uploadPurchaseOrderDocument')->name('purchaseOrder.uploadDocument');
         Route::post('/purchaseOrder/update-ocr-data', 'updatePurchaseOrderOCRData')->name('purchaseOrder.updateOCRData');
         Route::get('/purchaseOrder/test-ocr', 'testPurchaseOrderOCR')->name('purchaseOrder.testOCR');
+    });
+
+    // Reports
+    Route::controller(ReportController::class)->group(function () {
+        Route::get('/reports/pending-receipts', 'PendingReceiptsAll')->name('reports.pendingReceipts');
+        Route::get('/reports/pending-receipts/{id}', 'PendingReceiptsDetail')->name('reports.pendingReceipts.detail');
     });
 
     // Entradas de Mercadoria

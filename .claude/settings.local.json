@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(php artisan *)"
+      "Bash(php artisan *)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }

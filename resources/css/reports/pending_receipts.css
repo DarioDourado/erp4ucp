@@ -1,0 +1,63 @@
+/* ─── KPI highlight ─────────────────────────────────────────────────────── */
+.pending-kpi-highlight {
+    border-color: #fecaca !important;
+    background: linear-gradient(180deg, #fff5f5 0%, #fff 100%) !important;
+}
+
+.pending-progress-wrap {
+    width: 80px;
+    height: 8px;
+    background: #e2e8f0;
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.pending-progress-bar {
+    height: 100%;
+    background: #f59e0b;
+    border-radius: 999px;
+    transition: width .3s ease;
+}
+
+.pending-progress-bar.full {
+    background: #16a34a;
+}
+
+.pending-row td {
+    background-color: #fffbeb !important;
+}
+
+.received-row td {
+    background-color: #f0fdf4 !important;
+}
+
+.pending-detail-info-label {
+    font-size: .78rem;
+    color: #64748b;
+    margin-bottom: 4px;
+}
+
+.pending-detail-info-value {
+    font-size: .95rem;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.pending-legend-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: .3rem .7rem;
+    font-size: .75rem;
+    font-weight: 700;
+}
+
+.pending-legend-badge.badge-pending {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.pending-legend-badge.badge-received {
+    background: #dcfce7;
+    color: #166534;
+}
