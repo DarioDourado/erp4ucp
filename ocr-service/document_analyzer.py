@@ -133,7 +133,7 @@ def analyze_document_with_llm(
     Args:
         ocr_text: The raw text extracted by OCR
         model: llama-cpp model name
-        llm_url: llama-cpp API base URL (OpenAI-compatible)
+        llm_url: Ollama API base URL (OpenAI-compatible)
         temperature: LLM temperature (low = more deterministic)
 
     Returns:
@@ -271,8 +271,11 @@ OCR Text:
 
 
 def _extract_json_from_llm_output(text: str) -> dict | None:
-    """Extract JSON object from LLM output, handling markdown fences."""
+    """Extract JSON object from LLM output, handling markdown fences and thinking tokens."""
     import re
+
+    # Strip <think>...</think> blocks (qwen3 / thinking models)
+    text = re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE).strip()
 
     json_pattern = r'```(?:json)?\s*([\s\S]*?)```'
     matches = re.findall(json_pattern, text)
